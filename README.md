@@ -265,7 +265,7 @@ The assignment submission system supports full academic coursework workflows:
 4. **Dual-Portal Synchronization**:
    - **Course Details (`/courses/:id`)**: Displays live status badges (`Graded: X/Y`, `Submitted`, `Submitted (Late)`, `Pending`), submission dates, instructor remarks, and refetches automatically upon submission.
    - **Assignments Page (`/assignments`)**: Offers global overview of all pending and submitted assignments across all enrolled courses.
-   - **Grading Portal (`/submissions`)**: Dedicated faculty interface to evaluate submissions, enter marks ($\le \text{max\_marks}$ enforced by DB trigger), and return feedback.
+   - **Grading Portal (`/submissions`)**: Dedicated faculty interface to evaluate submissions, enter marks (≤ `max_marks`, enforced by DB trigger), and return feedback.
 
 ---
 
@@ -376,7 +376,7 @@ Verifies:
 - Student demographic insertions and trigger age enforcement ($\ge 16$).
 - Course creation and `teaches` M:N relationships.
 - Enrollment composite primary key uniqueness.
-- Coursework submission and trigger marks constraint ($0 \le \text{marks} \le \text{max\_marks}$).
+- Coursework submission and trigger marks constraint (`0 ≤ marks ≤ max_marks`).
 - Relational quiz scoring and attempt evaluation.
 - Course feedback CHECK constraint ($1 \le \text{rating} \le 5$).
 - Views, Stored Procedures, Stored Functions, and Audit triggers.
