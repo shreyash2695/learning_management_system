@@ -1,5 +1,6 @@
 import crypto from 'crypto';
 import { dbGet, dbAll, dbRun, dbTransaction } from '../config/db.js';
+import { syncStudentToNeo4j, syncInstructorToNeo4j } from '../config/neo4j.js';
 
 const JWT_SECRET = process.env.JWT_SECRET || 'lms-academic-secret-key-2026-dbms-grade';
 
@@ -104,25 +105,30 @@ export async function login(req, res) {
     const trimmedPassword = password.trim();
 
     if (role === 'student') {
-      // Authenticate against database 'account' table
-      const account = await dbGet('SELECT * FROM account WHERE username = ?', [trimmedUsername]);
+      // Authenticate against database 'account' & 'student' tables (supports username, first_name, email, or student_id)
+      const cleanUsername = trimmedUsername.replace(/_user$/i, '');
+      const account = await dbGet(`
+        SELECT a.*, s.first_name, s.last_name, s.email, s.proctor_id
+        FROM account a
+        JOIN student s ON a.student_id = s.student_id
+        WHERE LOWER(a.username) = LOWER(?)
+           OR LOWER(a.username) = LOWER(?)
+           OR LOWER(s.first_name) = LOWER(?)
+           OR LOWER(s.email) = LOWER(?)
+           OR CAST(s.student_id AS CHAR) = ?
+      `, [trimmedUsername, `${cleanUsername}_user`, trimmedUsername, trimmedUsername, trimmedUsername]);
+
       if (!account || !verifyPassword(trimmedPassword, account.password)) {
         return res.status(401).json({ success: false, error: 'Invalid student username or password.' });
       }
 
-      // Fetch student details
-      const student = await dbGet('SELECT * FROM student WHERE student_id = ?', [account.student_id]);
-      if (!student) {
-        return res.status(404).json({ success: false, error: 'Associated student record not found.' });
-      }
-
       const userPayload = {
-        id: student.student_id,
-        name: `${student.first_name} ${student.last_name}`,
+        id: account.student_id,
+        name: `${account.first_name} ${account.last_name}`,
         username: account.username,
-        email: student.email,
+        email: account.email,
         role: 'student',
-        proctor_id: student.proctor_id
+        proctor_id: account.proctor_id
       };
 
       const token = signJwt(userPayload);
@@ -140,27 +146,20 @@ export async function login(req, res) {
         SELECT * FROM instructor 
         WHERE LOWER(email) = LOWER(?) 
            OR LOWER(first_name) = LOWER(?)
-           OR LOWER(first_name) = LOWER(?)
            OR CAST(instructor_id AS CHAR) = ?
-      `, [trimmedUsername, trimmedUsername, cleanUsername, trimmedUsername]);
+      `, [trimmedUsername, cleanUsername, trimmedUsername]);
       if (!instructor) {
         return res.status(401).json({ 
           success: false, 
-          error: 'Invalid instructor credentials. (Hint: Use registered email e.g. raj@gmail.com or username raj_prof and password prof123)' 
+          error: 'Invalid instructor credentials.' 
         });
       }
 
-      const validPasswords = [
-        instructor.password,
-        'prof123',
-        `${instructor?.first_name?.toLowerCase()}123`
-      ];
-
-      const matches = validPasswords.some(p => p && verifyPassword(trimmedPassword, p));
+      const matches = instructor.password && verifyPassword(trimmedPassword, instructor.password);
       if (!matches) {
         return res.status(401).json({ 
           success: false, 
-          error: 'Invalid instructor credentials. (Hint: Use registered email and prof123)' 
+          error: 'Invalid instructor credentials.' 
         });
       }
 
@@ -200,7 +199,7 @@ export async function login(req, res) {
           token
         });
       } else {
-        return res.status(401).json({ success: false, error: 'Invalid admin credentials. (Hint: admin / admin123)' });
+        return res.status(401).json({ success: false, error: 'Invalid admin credentials.' });
       }
     } else {
       return res.status(400).json({ success: false, error: 'Invalid user role selected.' });
@@ -454,6 +453,13 @@ export async function register(req, res) {
         } catch {}
       });
 
+      // Synchronize newly created student node to Neo4j Cloud
+      await syncStudentToNeo4j({
+        student_id: newStudentId,
+        name: `${first_name.trim()} ${last_name.trim()}`,
+        email: trimmedEmail
+      });
+
       const userPayload = {
         id: newStudentId,
         name: `${first_name.trim()} ${last_name.trim()}`,
@@ -560,12 +566,49 @@ export async function register(req, res) {
           VALUES (?, ?)
         `, [newInstructorId, cleanPhone]);
 
+        // Auto-provision matching proctor portfolio for newly registered faculty
+        try {
+          const existingProctor = await tx.get(
+            'SELECT proctor_id FROM proctor WHERE LOWER(TRIM(first_name)) = LOWER(TRIM(?)) AND LOWER(TRIM(last_name)) = LOWER(TRIM(?))',
+            [first_name.trim(), last_name.trim()]
+          );
+          if (!existingProctor) {
+            const maxProc = await tx.get('SELECT MAX(proctor_id) as max_id FROM proctor');
+            const newProctorId = Math.max(6, (parseInt(maxProc?.max_id, 10) || 5) + 1);
+            await tx.run(
+              'INSERT INTO proctor (proctor_id, first_name, middle_name, last_name, cabin_no) VALUES (?, ?, ?, ?, ?)',
+              [newProctorId, first_name.trim(), middle_name?.trim() || null, last_name.trim(), trimmedCabin]
+            );
+            await tx.run(
+              'INSERT INTO proctor_phone (proctor_id, phone_no) VALUES (?, ?)',
+              [newProctorId, cleanPhone]
+            );
+          }
+        } catch (procErr) {
+          console.warn('[Register] Could not auto-provision proctor profile for instructor:', procErr.message);
+        }
+
         try {
           await tx.run(`
             INSERT INTO audit_log (table_name, operation, record_id, changed_at, description)
             VALUES ('instructor', 'INSERT', CAST(? AS CHAR), CURRENT_TIMESTAMP, ?)
           `, [newInstructorId, `New faculty registered: Prof. ${first_name.trim()} ${last_name.trim()} (${trimmedEmail}) in Cabin ${trimmedCabin}`]);
         } catch {}
+      });
+
+      let deptName = 'General';
+      try {
+        const dRow = await dbGet('SELECT dept_name FROM department WHERE dept_id = ?', [assignedDeptId]);
+        if (dRow) deptName = dRow.dept_name;
+      } catch {}
+
+      // Synchronize newly created instructor node to Neo4j Cloud
+      await syncInstructorToNeo4j({
+        instructor_id: newInstructorId,
+        name: `Prof. ${first_name.trim()} ${last_name.trim()}`,
+        email: trimmedEmail,
+        cabin_no: trimmedCabin,
+        dept: deptName
       });
 
       const userPayload = {

@@ -1,6 +1,8 @@
 import React, { useEffect, useState, useRef } from 'react';
+import { Link } from 'react-router-dom';
 import { 
   Database, 
+  Network, 
   PlusCircle, 
   Search, 
   Edit3, 
@@ -406,11 +408,11 @@ export default function CrudStudio() {
     e.preventDefault();
     setInsertError(null);
     try {
-      await crudApi.insertRecord(selectedTable, formData);
-      setStatusMessage({ type: 'success', text: `Successfully inserted record into '${selectedTable}'!` });
+      const res = await crudApi.insertRecord(selectedTable, formData);
+      setStatusMessage({ type: 'success', text: res.message || `Successfully inserted record into '${selectedTable}'!` });
       setIsInsertOpen(false);
       loadTableData(selectedTable, search);
-      setTimeout(() => setStatusMessage(null), 3000);
+      setTimeout(() => setStatusMessage(null), 8000);
     } catch (err) {
       setInsertError(err.message);
     }
@@ -487,7 +489,7 @@ export default function CrudStudio() {
           </div>
 
           {/* Mode Switcher */}
-          <div className="flex items-center gap-2 bg-purple-900/40 p-1.5 rounded-2xl border border-white/20 shrink-0">
+          <div className="flex flex-wrap items-center gap-2 bg-purple-900/40 p-1.5 rounded-2xl border border-white/20 shrink-0">
             <button
               onClick={() => { setActiveTab('query'); if (!queryResult) handleExecuteSql(); }}
               className={`px-4 py-2 rounded-xl text-xs font-bold transition-all flex items-center gap-1.5 ${
@@ -508,6 +510,13 @@ export default function CrudStudio() {
             >
               <TableIcon className="w-4 h-4" /> Table CRUD Manager
             </button>
+            <Link
+              to="/curriculum-graph"
+              className="px-4 py-2 rounded-xl text-xs font-bold transition-all flex items-center gap-1.5 bg-indigo-500/30 hover:bg-indigo-500/50 text-white border border-indigo-300/30 shadow-xs"
+            >
+              <Network className="w-4 h-4 text-indigo-300" />
+              <span>Neo4j Knowledge Graph &rarr;</span>
+            </Link>
           </div>
         </div>
       </div>

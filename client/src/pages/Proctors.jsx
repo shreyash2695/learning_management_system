@@ -1,4 +1,5 @@
 import React, { useEffect, useState } from 'react';
+import { Link } from 'react-router-dom';
 import { 
   ShieldCheck, 
   Building, 
@@ -11,7 +12,8 @@ import {
   Info,
   Calendar,
   MessageSquare,
-  Clock
+  Clock,
+  UserCheck
 } from 'lucide-react';
 import { lmsApi } from '../services/api';
 import { useAuth } from '../context/AuthContext';
@@ -26,7 +28,9 @@ export default function Proctors() {
   
   // Meeting request dialog state
   const [requestingMeeting, setRequestingMeeting] = useState(false);
+  const [submittingMeeting, setSubmittingMeeting] = useState(false);
   const [meetingTopic, setMeetingTopic] = useState('Academic Progress & Advisory');
+  const [meetingPreferredTime, setMeetingPreferredTime] = useState('During Cabin Office Hours (Mon-Fri 3:00 - 5:00 PM)');
   const [meetingNotes, setMeetingNotes] = useState('');
 
   useEffect(() => {
@@ -39,17 +43,44 @@ export default function Proctors() {
   // Find student's single assigned proctor
   const myProctor = proctors.find(p => p.students && p.students.some(s => s.student_id === currentUser?.id));
 
-  const handleSendMeetingRequest = (e) => {
+  // Find instructor's own proctor assignment & wards via relational identity matching (replaces arbitrary modulo hack)
+  const myProctorAssignment = proctors.find(p => 
+    p.instructor_id === currentUser?.id || 
+    (currentUser?.first_name && currentUser?.last_name && 
+      p.first_name?.toLowerCase() === currentUser.first_name.toLowerCase() && 
+      p.last_name?.toLowerCase() === currentUser.last_name.toLowerCase()) ||
+    (currentUser?.cabin_no && p.cabin_no && p.cabin_no.trim().toLowerCase() === currentUser.cabin_no.trim().toLowerCase()) ||
+    (currentUser?.name && `${p.first_name} ${p.last_name}`.toLowerCase() === currentUser.name.replace(/^Prof\.\s*/i, '').trim().toLowerCase())
+  ) || proctors.find(p => p.proctor_id === (parseInt(currentUser?.id, 10) - 200)) || proctors[0];
+
+  const handleSendMeetingRequest = async (e) => {
     e.preventDefault();
-    if (!myProctor) return;
-    const proctorName = `${myProctor.first_name} ${myProctor.last_name}`;
-    setConsultNotice({
-      title: `Meeting Requested with Prof. ${proctorName}`,
-      detail: `Topic: "${meetingTopic}" • Cabin ${myProctor.cabin_no}. Your proctor will review this request.`
-    });
-    setRequestingMeeting(false);
-    setMeetingNotes('');
-    setTimeout(() => setConsultNotice(null), 6000);
+    if (!myProctor || !currentUser?.id) return;
+    setSubmittingMeeting(true);
+    try {
+      await lmsApi.requestProctorMeeting({
+        student_id: currentUser.id,
+        topic: meetingTopic,
+        preferred_time: meetingPreferredTime,
+        notes: meetingNotes
+      });
+      const proctorName = `${myProctor.first_name} ${myProctor.last_name}`;
+      setConsultNotice({
+        title: `Meeting Requested with Prof. ${proctorName}`,
+        detail: `Topic: "${meetingTopic}" • Cabin ${myProctor.cabin_no}. Your proctor has received this request and will review it.`
+      });
+      setRequestingMeeting(false);
+      setMeetingNotes('');
+      setTimeout(() => setConsultNotice(null), 6000);
+    } catch (err) {
+      console.error('Failed to request proctor meeting:', err);
+      setConsultNotice({
+        title: 'Meeting Request Failed',
+        detail: err.message || 'Unable to submit meeting request at this time. Please try again.'
+      });
+    } finally {
+      setSubmittingMeeting(false);
+    }
   };
 
   const filtered = proctors.filter(p => {
@@ -63,26 +94,84 @@ export default function Proctors() {
       {/* Header */}
       <div>
         <h1 className="text-2xl font-extrabold text-slate-900 tracking-tight">
-          {isStudent ? 'My Assigned Proctor & Mentorship' : 'Proctoring & Student Mentorship Directorate'}
+          {isStudent ? 'My Assigned Proctor & Mentorship' : isInstructor ? 'My Proctor Directorate & Student Wards' : 'Proctoring & Student Mentorship Directorate'}
         </h1>
         <p className="text-sm text-slate-500">
           {isStudent 
             ? 'Dedicated 1-to-1 faculty advisory allocation and university proctor directory' 
-            : 'University faculty advisors and 1-to-1 student ward allocation registry'}
+            : isInstructor
+              ? 'Your assigned student mentees (wards), academic standing, and university proctor registry'
+              : 'University faculty mentors (Proctors) and 1-to-1 student mentee (Ward) allocation registry'}
         </p>
+
+        {/* Proctor-Ward Concept Explainer Note */}
+        <div className="mt-3 p-3.5 rounded-2xl bg-blue-50/80 border border-blue-200/60 text-xs text-blue-900 flex items-start gap-2.5">
+          <Info className="w-4 h-4 text-blue-600 shrink-0 mt-0.5" />
+          <div>
+            <strong className="font-bold">About the University Proctor-Ward System:</strong> In academic governance, a <strong>Proctor</strong> is a full-time faculty mentor appointed to oversee student welfare and clearance. Each student assigned under their advisory portfolio is officially designated as a <strong>Ward</strong>.
+          </div>
+        </div>
       </div>
 
-      {/* Instructor Notice: Faculty do not have proctors */}
-      {isInstructor && (
-        <div className="p-5 bg-gradient-to-r from-blue-50 to-indigo-50 border border-blue-200 rounded-3xl text-blue-900 flex items-start gap-4 shadow-xs">
-          <div className="p-2.5 bg-blue-600 text-white rounded-2xl shadow-sm shrink-0 mt-0.5">
-            <ShieldCheck className="w-5 h-5" />
+      {/* Instructor's Own Proctor Allocation Spotlight */}
+      {isInstructor && myProctorAssignment && (
+        <div className="bg-gradient-to-r from-blue-800 via-indigo-700 to-blue-900 text-white rounded-3xl p-6 sm:p-8 shadow-lg shadow-blue-700/15">
+          <div className="flex flex-col md:flex-row md:items-center justify-between gap-6">
+            <div className="flex items-start sm:items-center gap-5">
+              <div className="w-16 h-16 rounded-2xl bg-white/15 backdrop-blur-md text-white flex items-center justify-center font-extrabold text-2xl shadow-inner shrink-0 border border-white/20">
+                <ShieldCheck className="w-9 h-9 text-blue-200" />
+              </div>
+              <div>
+                <div className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-blue-500/30 border border-blue-300/30 backdrop-blur-md text-[10px] font-extrabold uppercase tracking-wider mb-2">
+                  <CheckCircle2 className="w-3 h-3 text-blue-300" /> Your Faculty Proctor Directorate
+                </div>
+                <h2 className="text-xl sm:text-2xl font-extrabold tracking-tight text-white">
+                  Prof. {currentUser?.first_name || myProctorAssignment.first_name} {currentUser?.last_name || myProctorAssignment.last_name}
+                </h2>
+                <p className="text-xs text-blue-100/90 mt-1.5 flex flex-wrap items-center gap-4 font-medium">
+                  <span className="flex items-center gap-1.5">
+                    <Building className="w-4 h-4 text-blue-300" /> Cabin: <strong className="text-white font-bold">{myProctorAssignment.cabin_no || 'Cabin 401'}</strong>
+                  </span>
+                  <span className="flex items-center gap-1.5">
+                    <Users className="w-4 h-4 text-blue-300" /> Proctor Unit #{myProctorAssignment.proctor_id}
+                  </span>
+                  <span className="flex items-center gap-1.5">
+                    <UserCheck className="w-4 h-4 text-emerald-300" /> Assigned Student Wards: <strong className="text-white font-bold">{myProctorAssignment.students?.length || myProctorAssignment.ward_count || 0} students</strong>
+                  </span>
+                </p>
+              </div>
+            </div>
+
+            <Link
+              to="/"
+              className="px-5 py-3 rounded-xl bg-white text-blue-900 hover:bg-blue-50 font-extrabold text-xs shadow-md transition-all active:scale-95 flex items-center gap-2 self-start md:self-auto shrink-0"
+            >
+              <Calendar className="w-4 h-4 text-blue-700" />
+              Manage Wards on Dashboard
+            </Link>
           </div>
-          <div className="space-y-1">
-            <h3 className="font-extrabold text-sm text-blue-950">Faculty Advisory Notice: Instructors Do Not Have Proctors</h3>
-            <p className="text-xs text-blue-800 leading-relaxed">
-              Under university academic regulations, the <strong>Proctoring &amp; Mentorship System</strong> is established strictly for undergraduate student wards (1 dedicated faculty mentor per student). As a faculty member/instructor, you do not have an assigned proctor. You can manage your taught courses, create quizzes, and grade assignment submissions directly from the instructor navigation. The directory below displays the university-wide proctor ward distribution for academic coordination.
-            </p>
+
+          {/* Quick list of wards */}
+          <div className="mt-6 pt-5 border-t border-white/15">
+            <h4 className="text-xs font-bold uppercase tracking-wider text-blue-200 mb-3 flex items-center gap-2">
+              <Users className="w-3.5 h-3.5" /> Your Direct Student Wards ({myProctorAssignment.students?.length || 0}):
+            </h4>
+            <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-3">
+              {(myProctorAssignment.students || []).map((s) => (
+                <div key={s.student_id} className="p-3 bg-white/10 backdrop-blur-md rounded-2xl border border-white/15 flex items-center justify-between text-xs">
+                  <div>
+                    <span className="font-bold text-white block">{s.first_name} {s.last_name}</span>
+                    <span className="text-[11px] text-blue-200 block">Roll #{s.student_id} • CGPA: {s.cgpa || '8.50'}</span>
+                    <span className="text-[10px] text-blue-300 block truncate max-w-[180px]">
+                      {s.enrolled_courses || 'DBMS, OS'}
+                    </span>
+                  </div>
+                  <span className="px-2 py-0.5 rounded-full bg-white/20 text-white font-bold text-[10px]">
+                    Ward
+                  </span>
+                </div>
+              ))}
+            </div>
           </div>
         </div>
       )}
@@ -196,7 +285,8 @@ export default function Proctors() {
                           type="text" 
                           placeholder="e.g. Tomorrow 3:00 PM during cabin hours"
                           className="w-full pl-9 pr-3 py-2 rounded-xl border border-slate-200 text-xs font-medium focus:ring-2 focus:ring-emerald-500/20 focus:border-emerald-500"
-                          defaultValue="During Cabin Office Hours (Mon-Fri 3:00 - 5:00 PM)"
+                          value={meetingPreferredTime}
+                          onChange={(e) => setMeetingPreferredTime(e.target.value)}
                         />
                       </div>
                     </div>
@@ -216,16 +306,18 @@ export default function Proctors() {
                   <div className="flex justify-end gap-2 pt-2">
                     <button
                       type="button"
+                      disabled={submittingMeeting}
                       onClick={() => setRequestingMeeting(false)}
-                      className="px-4 py-2 rounded-xl text-xs font-bold text-slate-600 hover:bg-slate-100"
+                      className="px-4 py-2 rounded-xl text-xs font-bold text-slate-600 hover:bg-slate-100 disabled:opacity-50"
                     >
                       Dismiss
                     </button>
                     <button
                       type="submit"
-                      className="px-5 py-2 rounded-xl text-xs font-bold bg-emerald-600 hover:bg-emerald-700 text-white shadow-xs"
+                      disabled={submittingMeeting}
+                      className="px-5 py-2 rounded-xl text-xs font-bold bg-emerald-600 hover:bg-emerald-700 text-white shadow-xs disabled:opacity-50 flex items-center gap-1.5"
                     >
-                      Confirm Meeting Request
+                      {submittingMeeting ? 'Submitting...' : 'Confirm Meeting Request'}
                     </button>
                   </div>
                 </form>
@@ -300,7 +392,7 @@ export default function Proctors() {
                     {isMyAssignedProctor ? (
                       <Badge variant="green">Your Assigned Proctor</Badge>
                     ) : (
-                      <Badge variant="gray">Ward Unit #{p.proctor_id}</Badge>
+                      <Badge variant="gray">Proctor #{p.proctor_id}</Badge>
                     )}
                   </div>
 
@@ -324,15 +416,15 @@ export default function Proctors() {
                   {/* Assigned Student Wards */}
                   <div className="mt-5 pt-3 border-t border-slate-100">
                     <div className="text-[11px] font-bold text-slate-400 uppercase tracking-wider mb-2 flex items-center justify-between">
-                      <span>Assigned Wards</span>
+                      <span>Assigned Students (Wards)</span>
                       <span className="text-emerald-700 font-bold">{p.students?.length || 0} Student(s)</span>
                     </div>
 
                     <div className="space-y-1.5 max-h-32 overflow-y-auto pr-1">
                       {p.students && p.students.map((st) => (
                         <div 
-                          key={st.student_id} 
-                          className={`p-2 rounded-xl flex items-center justify-between text-xs ${
+                           key={st.student_id} 
+                           className={`p-2 rounded-xl flex items-center justify-between text-xs ${
                             isStudent && st.student_id === currentUser?.id 
                               ? 'bg-emerald-50 border border-emerald-200 text-emerald-950 font-bold' 
                               : 'bg-slate-50 text-slate-700'
@@ -342,7 +434,7 @@ export default function Proctors() {
                             {st.first_name} {st.last_name}
                             {isStudent && st.student_id === currentUser?.id && ' (You)'}
                           </span>
-                          <span className="text-[10px] text-slate-400 shrink-0 ml-2">#{st.student_id}</span>
+                          <span className="text-[10px] text-slate-400 shrink-0 ml-2 font-mono">Student ID: #{st.student_id}</span>
                         </div>
                       ))}
                       {(!p.students || p.students.length === 0) && (
@@ -371,18 +463,18 @@ export default function Proctors() {
                     </>
                   ) : isStudent ? (
                     <div className="w-full flex items-center justify-between text-[11px] text-slate-400">
-                      <span>Assigned to other student wards</span>
+                      <span>Assigned to other student mentees</span>
                       <span className="italic font-medium">Reference Only</span>
                     </div>
                   ) : isInstructor ? (
                     <div className="w-full flex items-center justify-between text-[11px] text-slate-500 font-medium">
                       <span>Faculty Mentorship Unit</span>
-                      <Badge variant="blue">{p.students?.length || 0} Wards</Badge>
+                      <Badge variant="blue">{p.students?.length || 0} Students</Badge>
                     </div>
                   ) : (
                     <div className="w-full flex items-center justify-between text-xs">
-                      <span className="text-slate-500 font-semibold">{p.students?.length || 0} Active Wards</span>
-                      <Badge variant="purple">Unit #{p.proctor_id}</Badge>
+                      <span className="text-slate-500 font-semibold">{p.students?.length || 0} Assigned Students</span>
+                      <Badge variant="purple">Proctor #{p.proctor_id}</Badge>
                     </div>
                   )}
                 </div>

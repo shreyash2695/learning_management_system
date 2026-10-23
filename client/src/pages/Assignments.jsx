@@ -24,6 +24,7 @@ import { lmsApi } from '../services/api';
 import { useAuth } from '../context/AuthContext';
 import Badge from '../components/common/Badge';
 import Modal from '../components/common/Modal';
+import DocumentCodeViewer from '../components/common/DocumentCodeViewer';
 
 export default function Assignments() {
   const { currentUser, isAdmin, isInstructor, isStudent } = useAuth();
@@ -168,7 +169,26 @@ export default function Assignments() {
         contentPayload = contentPayload ? `${contentPayload}\n\nRepository/Solution URL: ${solutionUrl.trim()}` : `Repository/Solution URL: ${solutionUrl.trim()}`;
       }
       if (attachedFile) {
-        contentPayload = contentPayload ? `${contentPayload}\n[Attached File: ${attachedFile.name} (${Math.round(attachedFile.size / 1024)} KB)]` : `[Attached File: ${attachedFile.name} (${Math.round(attachedFile.size / 1024)} KB)]`;
+        try {
+          const reader = new FileReader();
+          const base64Promise = new Promise((resolve, reject) => {
+            reader.onload = () => resolve(reader.result);
+            reader.onerror = reject;
+            reader.readAsDataURL(attachedFile);
+          });
+          const base64 = await base64Promise;
+          const uploadRes = await lmsApi.uploadFile(attachedFile.name, base64);
+          if (uploadRes.success && uploadRes.fileUrl) {
+            contentPayload = contentPayload 
+              ? `${contentPayload}\n\nAttached File: ${uploadRes.fileUrl} (${attachedFile.name})`
+              : `Attached File: ${uploadRes.fileUrl} (${attachedFile.name})`;
+          }
+        } catch (uploadErr) {
+          console.warn('File upload fallback:', uploadErr.message);
+          contentPayload = contentPayload 
+            ? `${contentPayload}\n[Attached File: ${attachedFile.name} (${Math.round(attachedFile.size / 1024)} KB)]` 
+            : `[Attached File: ${attachedFile.name} (${Math.round(attachedFile.size / 1024)} KB)]`;
+        }
       }
       if (!contentPayload) {
         contentPayload = 'Assignment completed and submitted.';
@@ -775,92 +795,119 @@ export default function Assignments() {
             setGradingSub(null);
           }}
           title={gradingSub ? `Evaluate Submission: ${gradingSub.first_name} ${gradingSub.last_name}` : `Submissions: ${reviewAssignment.name}`}
+          maxWidth={gradingSub ? "max-w-5xl" : "max-w-2xl"}
         >
           {gradingSub ? (
-            <form onSubmit={handleSaveGrade} className="space-y-4">
-              <div className="p-3.5 bg-purple-50 rounded-2xl border border-purple-200/70 text-xs text-purple-900 space-y-1">
-                <div className="flex items-center justify-between">
-                  <span className="font-bold text-sm text-purple-950">
-                    {gradingSub.first_name} {gradingSub.last_name}
-                  </span>
-                  <Badge variant="purple">Roll No: #{gradingSub.student_id}</Badge>
-                </div>
-                <p><strong>Course:</strong> {reviewAssignment.course_name} (#{reviewAssignment.course_id})</p>
-                <p><strong>Max Marks:</strong> {reviewAssignment.marks} Marks • <strong>Due:</strong> {reviewAssignment.due_date}</p>
-                <p><strong>Submitted:</strong> {gradingSub.submission_date} ({gradingSub.status})</p>
-              </div>
-
-              {/* Student solution text */}
-              <div>
-                <label className="block text-xs font-bold text-slate-700 mb-1">
-                  Student's Coursework Solution Notes
+            <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
+              {/* Left Column: Solution Previewer (Code / Document / Repo) */}
+              <div className="lg:col-span-7 flex flex-col">
+                <label className="text-xs font-bold text-slate-700 mb-2 flex items-center gap-1.5">
+                  <Sparkles className="w-3.5 h-3.5 text-purple-600" />
+                  Submission Inspector &amp; Code Previewer
                 </label>
-                <div className="p-3 bg-slate-50 rounded-xl border border-slate-200 text-xs font-mono text-slate-800 max-h-32 overflow-y-auto whitespace-pre-wrap">
-                  {gradingSub.submission_content || 'Completed assignment solution.'}
+                <div className="flex-1 min-h-[380px]">
+                  <DocumentCodeViewer
+                    content={gradingSub.submission_content}
+                    filename={gradingSub.assignment_name || reviewAssignment.name}
+                    height="h-[430px]"
+                  />
                 </div>
               </div>
 
-              {/* Marks input */}
-              <div>
-                <div className="flex items-center justify-between mb-1">
-                  <label className="text-xs font-bold text-slate-700">
-                    Marks Awarded <span className="text-rose-500">*</span>
-                  </label>
-                  <span className="text-[11px] font-bold text-purple-700">
-                    Max: {reviewAssignment.marks} Marks
-                  </span>
-                </div>
-                <input
-                  type="number"
-                  min="0"
-                  max={reviewAssignment.marks}
-                  value={gradeMarks}
-                  onChange={(e) => setGradeMarks(e.target.value)}
-                  placeholder={`0 to ${reviewAssignment.marks}`}
-                  className="w-full px-3.5 py-2.5 rounded-xl border border-slate-200 text-sm font-bold text-slate-900 focus:ring-2 focus:ring-purple-500/20 focus:border-purple-500"
-                  required
-                  autoFocus
-                />
-              </div>
+              {/* Right Column: Grading & Feedback Controls */}
+              <div className="lg:col-span-5">
+                <form onSubmit={handleSaveGrade} className="space-y-4">
+                  <div className="p-3.5 bg-purple-50 rounded-2xl border border-purple-200/70 text-xs text-purple-900 space-y-1">
+                    <div className="flex items-center justify-between">
+                      <span className="font-bold text-sm text-purple-950">
+                        {gradingSub.first_name} {gradingSub.last_name}
+                      </span>
+                      <Badge variant="purple">Roll #{gradingSub.student_id}</Badge>
+                    </div>
+                    <p><strong>Course:</strong> {reviewAssignment.course_name} (#{reviewAssignment.course_id})</p>
+                    <p><strong>Max Marks:</strong> {reviewAssignment.marks} Marks • <strong>Due:</strong> {reviewAssignment.due_date}</p>
+                    <p><strong>Submitted:</strong> {gradingSub.submission_date} ({gradingSub.status})</p>
+                  </div>
 
-              {/* Feedback */}
-              <div>
-                <label className="block text-xs font-bold text-slate-700 mb-1">
-                  Instructor Remarks / Evaluation Feedback <span className="text-rose-500">*</span>
-                </label>
-                <textarea
-                  rows="3"
-                  value={gradeFeedback}
-                  onChange={(e) => setGradeFeedback(e.target.value)}
-                  placeholder="Constructive feedback on query design, schema, or implementation..."
-                  className="w-full px-3 py-2 rounded-xl border border-slate-200 text-xs focus:ring-2 focus:ring-purple-500/20 focus:border-purple-500"
-                  required
-                />
-              </div>
+                  {/* Marks input */}
+                  <div>
+                    <div className="flex items-center justify-between mb-1">
+                      <label className="text-xs font-bold text-slate-700">
+                        Marks Awarded <span className="text-rose-500">*</span>
+                      </label>
+                      <span className="text-[11px] font-bold text-purple-700">
+                        Max: {reviewAssignment.marks} Marks
+                      </span>
+                    </div>
+                    <input
+                      type="number"
+                      min="0"
+                      max={reviewAssignment.marks}
+                      value={gradeMarks}
+                      onChange={(e) => setGradeMarks(e.target.value)}
+                      placeholder={`0 to ${reviewAssignment.marks}`}
+                      className="w-full px-3.5 py-2.5 rounded-xl border border-slate-200 text-sm font-bold text-slate-900 focus:ring-2 focus:ring-purple-500/20 focus:border-purple-500"
+                      required
+                      autoFocus
+                    />
+                  </div>
 
-              {gradingNotice && (
-                <div className="p-2 bg-emerald-50 text-emerald-800 rounded-xl text-xs flex items-center gap-1.5 font-bold border border-emerald-200">
-                  <CheckCircle2 className="w-4 h-4 text-emerald-600" /> {gradingNotice}
-                </div>
-              )}
+                  {/* Feedback */}
+                  <div>
+                    <label className="block text-xs font-bold text-slate-700 mb-1">
+                      Instructor Remarks / Evaluation Feedback <span className="text-rose-500">*</span>
+                    </label>
+                    <div className="flex flex-wrap gap-1 mb-2">
+                      <button
+                        type="button"
+                        onClick={() => setGradeFeedback('Outstanding solution! Clean schema, optimized queries, and correct business logic.')}
+                        className="px-2 py-0.5 rounded-md bg-purple-50 text-[10px] font-semibold text-purple-700 hover:bg-purple-100"
+                      >
+                        ⭐ Outstanding
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setGradeFeedback('Good effort. Verify edge cases and index performance.')}
+                        className="px-2 py-0.5 rounded-md bg-purple-50 text-[10px] font-semibold text-purple-700 hover:bg-purple-100"
+                      >
+                        👍 Good Work
+                      </button>
+                    </div>
+                    <textarea
+                      rows="3"
+                      value={gradeFeedback}
+                      onChange={(e) => setGradeFeedback(e.target.value)}
+                      placeholder="Constructive feedback on query design, schema, or implementation..."
+                      className="w-full px-3 py-2 rounded-xl border border-slate-200 text-xs focus:ring-2 focus:ring-purple-500/20 focus:border-purple-500"
+                      required
+                    />
+                  </div>
 
-              <div className="flex justify-between items-center pt-3 border-t border-slate-100">
-                <button
-                  type="button"
-                  onClick={() => setGradingSub(null)}
-                  className="px-4 py-2 rounded-xl text-xs font-bold text-slate-600 hover:bg-slate-100"
-                >
-                  ← Back to List
-                </button>
-                <button
-                  type="submit"
-                  disabled={gradingLoading}
-                  className="px-5 py-2 rounded-xl text-xs font-bold bg-purple-600 hover:bg-purple-700 text-white shadow-md shadow-purple-600/20 disabled:opacity-50 flex items-center gap-1.5"
-                >
-                  {gradingLoading ? 'Saving...' : 'Save Grade & Feedback'}
-                </button>
+                  {gradingNotice && (
+                    <div className="p-2 bg-emerald-50 text-emerald-800 rounded-xl text-xs flex items-center gap-1.5 font-bold border border-emerald-200">
+                      <CheckCircle2 className="w-4 h-4 text-emerald-600" /> {gradingNotice}
+                    </div>
+                  )}
+
+                  <div className="flex justify-between items-center pt-3 border-t border-slate-100">
+                    <button
+                      type="button"
+                      onClick={() => setGradingSub(null)}
+                      className="px-4 py-2 rounded-xl text-xs font-bold text-slate-600 hover:bg-slate-100"
+                    >
+                      ← Back to List
+                    </button>
+                    <button
+                      type="submit"
+                      disabled={gradingLoading}
+                      className="px-5 py-2 rounded-xl text-xs font-bold bg-purple-600 hover:bg-purple-700 text-white shadow-md shadow-purple-600/20 disabled:opacity-50 flex items-center gap-1.5"
+                    >
+                      {gradingLoading ? 'Saving...' : 'Save Grade & Feedback'}
+                    </button>
+                  </div>
+                </form>
               </div>
-            </form>
+            </div>
           ) : (
             <div className="space-y-4">
               <div className="p-3 bg-purple-50 rounded-2xl border border-purple-100 flex items-center justify-between text-xs text-purple-900">

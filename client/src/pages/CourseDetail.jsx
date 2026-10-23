@@ -23,9 +23,10 @@ import {
   FolderCheck,
   Paperclip,
   Upload,
-  X
+  X,
+  Network
 } from 'lucide-react';
-import { lmsApi } from '../services/api';
+import { lmsApi, graphApi } from '../services/api';
 import { useAuth } from '../context/AuthContext';
 import Badge from '../components/common/Badge';
 import Modal from '../components/common/Modal';
@@ -52,6 +53,7 @@ export default function CourseDetail() {
   const [isEnrolled, setIsEnrolled] = useState(false);
   const [enrolling, setEnrolling] = useState(false);
   const [enrollNotice, setEnrollNotice] = useState(null);
+  const [graphPrereqs, setGraphPrereqs] = useState(null);
   
   // Module Reading Material Modal State
   const [viewingModule, setViewingModule] = useState(null);
@@ -122,10 +124,15 @@ export default function CourseDetail() {
     setLoading(true);
     setAccessDenied(false);
     try {
-      const [res, enrRes] = await Promise.all([
+      const [res, enrRes, prereqRes] = await Promise.all([
         lmsApi.getCourseDetails(id),
-        lmsApi.getEnrollments().catch(() => ({ enrollments: [] }))
+        lmsApi.getEnrollments().catch(() => ({ enrollments: [] })),
+        graphApi.getPrerequisites(id).catch(() => null)
       ]);
+
+      if (prereqRes?.success) {
+        setGraphPrereqs(prereqRes);
+      }
 
       // If user is instructor, enforce that they teach this course via teaches table
       if (isInstructor && res.course) {
@@ -483,12 +490,37 @@ export default function CourseDetail() {
               Comprehensive undergraduate course syllabus, modular content, assignments, and test assessments.
             </p>
 
-            {/* Academic Prerequisites */}
-            <div className="mt-3 inline-flex items-center gap-2 text-xs bg-slate-100/80 border border-slate-200 text-slate-700 px-3 py-1.5 rounded-xl font-medium">
-              <span className="font-bold text-slate-900 flex items-center gap-1">
-                <BookOpen className="w-3.5 h-3.5 text-blue-600" /> Prerequisites:
-              </span>
-              <span>{COURSE_PREREQUISITES[course.course_id] || 'Introductory Computing & Mathematics'}</span>
+            {/* Academic Prerequisites (Powered by Neo4j Graph DAG) */}
+            <div className="mt-3 flex flex-wrap items-center gap-2 text-xs">
+              <div className="inline-flex items-center gap-2 bg-slate-100/80 border border-slate-200 text-slate-700 px-3 py-1.5 rounded-xl font-medium">
+                <span className="font-bold text-slate-900 flex items-center gap-1">
+                  <BookOpen className="w-3.5 h-3.5 text-blue-600" /> Prerequisites:
+                </span>
+                {graphPrereqs?.allPrerequisites?.length > 0 ? (
+                  <span className="flex items-center gap-1.5">
+                    {graphPrereqs.allPrerequisites.map((p, idx) => (
+                      <React.Fragment key={p.course_id}>
+                        <span className="font-bold text-amber-800 bg-amber-100 px-2 py-0.5 rounded-md">
+                          {p.name} (CS-{p.course_id})
+                        </span>
+                        {idx < graphPrereqs.allPrerequisites.length - 1 && <span className="text-slate-400">&rarr;</span>}
+                      </React.Fragment>
+                    ))}
+                  </span>
+                ) : (
+                  <span>{COURSE_PREREQUISITES[course.course_id] || 'Foundational course. No prior prerequisites required.'}</span>
+                )}
+              </div>
+
+              {isAdmin && (
+                <Link
+                  to="/curriculum-graph"
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-indigo-50 hover:bg-indigo-100 text-indigo-700 border border-indigo-200 text-xs font-semibold transition-colors shadow-xs"
+                >
+                  <Network className="w-3.5 h-3.5 text-indigo-600" />
+                  <span>Explore in Knowledge Graph</span>
+                </Link>
+              )}
             </div>
 
             {/* Quick Enroll / Drop Action Button (Students only) */}
@@ -879,59 +911,77 @@ export default function CourseDetail() {
         <div className={`grid grid-cols-1 ${isStudent ? 'lg:grid-cols-2' : ''} gap-6`}>
           {/* Submit Feedback Form (Students Only) */}
           {isStudent && (
-            <div className="bg-white rounded-2xl border border-slate-200 p-6 shadow-xs">
-              <div className="flex items-center justify-between mb-2">
-                <h3 className="font-bold text-base text-slate-900">Submit Course & Faculty Feedback</h3>
-                <Badge variant="purple">Table: course_feedback</Badge>
+            !isEnrolled ? (
+              <div className="bg-white rounded-2xl border border-slate-200 p-8 shadow-xs flex flex-col items-center justify-center text-center">
+                <div className="w-12 h-12 rounded-2xl bg-amber-50 text-amber-600 flex items-center justify-center mb-3 border border-amber-200/60">
+                  <AlertCircle className="w-6 h-6" />
+                </div>
+                <h4 className="font-extrabold text-slate-800 text-sm">Enrollment Required for Course Evaluation</h4>
+                <p className="text-xs text-slate-500 mt-1.5 max-w-sm leading-relaxed">
+                  Only students currently enrolled in <strong>{course.course_name}</strong> are authorized to submit curriculum and faculty feedback to database table <code className="bg-slate-100 px-1 py-0.5 rounded text-slate-700">course_feedback</code>.
+                </p>
               </div>
-              <p className="text-xs text-slate-500 mb-4">
-                Your feedback is recorded with check constraints (1-5 stars) and linked to course {course.course_name}.
-              </p>
-
-              {feedbackSubmitted && (
-                <div className="mb-4 p-3 bg-emerald-50 border border-emerald-200 text-emerald-800 rounded-xl text-xs font-bold flex items-center gap-2">
-                  <CheckCircle2 className="w-4 h-4 text-emerald-600" />
-                  Feedback submitted successfully and logged to database!
+            ) : (
+              <div className="bg-white rounded-2xl border border-slate-200 p-6 shadow-xs">
+                <div className="flex items-center justify-between mb-2">
+                  <h3 className="font-bold text-base text-slate-900">Course &amp; Faculty Evaluation</h3>
+                  <Badge variant="purple">Table: course_feedback</Badge>
                 </div>
-              )}
+                <p className="text-xs text-slate-500 mb-4">
+                  {(courseData?.feedbacks || []).some(f => f.student_id === currentUser.id) 
+                    ? `You have already evaluated ${course.course_name}. Submitting below will update your rating and remarks.`
+                    : `Your feedback is recorded with check constraints (1-5 stars) and linked to course ${course.course_name}.`}
+                </p>
 
-              <form onSubmit={handleSendFeedback} className="space-y-4">
-                <div>
-                  <label className="block text-xs font-bold text-slate-700 mb-1">Overall Rating (1 - 5 Stars)</label>
-                  <select
-                    value={feedbackRating}
-                    onChange={(e) => setFeedbackRating(e.target.value)}
-                    className="w-full px-3 py-2 rounded-xl border border-slate-200 text-xs focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 font-semibold"
+                {feedbackSubmitted && (
+                  <div className="mb-4 p-3 bg-emerald-50 border border-emerald-200 text-emerald-800 rounded-xl text-xs font-bold flex items-center gap-2">
+                    <CheckCircle2 className="w-4 h-4 text-emerald-600" />
+                    Feedback recorded and saved successfully in database table course_feedback!
+                  </div>
+                )}
+
+                <form onSubmit={handleSendFeedback} className="space-y-4">
+                  <div>
+                    <label className="block text-xs font-bold text-slate-700 mb-1">Overall Rating (1 - 5 Stars)</label>
+                    <select
+                      value={feedbackRating}
+                      onChange={(e) => setFeedbackRating(e.target.value)}
+                      className="w-full px-3 py-2 rounded-xl border border-slate-200 text-xs focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 font-semibold"
+                    >
+                      <option value="5">⭐⭐⭐⭐⭐ 5 - Excellent</option>
+                      <option value="4">⭐⭐⭐⭐ 4 - Very Good</option>
+                      <option value="3">⭐⭐⭐ 3 - Satisfactory</option>
+                      <option value="2">⭐⭐ 2 - Needs Improvement</option>
+                      <option value="1">⭐ 1 - Poor</option>
+                    </select>
+                  </div>
+
+                  <div>
+                    <label className="block text-xs font-bold text-slate-700 mb-1">Detailed Remarks</label>
+                    <textarea
+                      rows="3"
+                      value={feedbackText}
+                      onChange={(e) => setFeedbackText(e.target.value)}
+                      placeholder="E.g., Great coverage of normalization, transactions, and indexing..."
+                      className="w-full px-3 py-2 rounded-xl border border-slate-200 text-xs focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500"
+                      required
+                    ></textarea>
+                  </div>
+
+                  <button
+                    type="submit"
+                    disabled={submittingFeedback}
+                    className="w-full py-2.5 rounded-xl bg-blue-600 hover:bg-blue-700 text-white font-bold text-xs shadow-xs transition-transform active:scale-95 disabled:opacity-50"
                   >
-                    <option value="5">⭐⭐⭐⭐⭐ 5 - Excellent</option>
-                    <option value="4">⭐⭐⭐⭐ 4 - Very Good</option>
-                    <option value="3">⭐⭐⭐ 3 - Satisfactory</option>
-                    <option value="2">⭐⭐ 2 - Needs Improvement</option>
-                    <option value="1">⭐ 1 - Poor</option>
-                  </select>
-                </div>
-
-                <div>
-                  <label className="block text-xs font-bold text-slate-700 mb-1">Detailed Remarks</label>
-                  <textarea
-                    rows="3"
-                    value={feedbackText}
-                    onChange={(e) => setFeedbackText(e.target.value)}
-                    placeholder="E.g., Great coverage of normalization, transactions, and indexing..."
-                    className="w-full px-3 py-2 rounded-xl border border-slate-200 text-xs focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500"
-                    required
-                  ></textarea>
-                </div>
-
-                <button
-                  type="submit"
-                  disabled={submittingFeedback}
-                  className="w-full py-2.5 rounded-xl bg-blue-600 hover:bg-blue-700 text-white font-bold text-xs shadow-xs transition-transform active:scale-95 disabled:opacity-50"
-                >
-                  {submittingFeedback ? 'Submitting...' : 'Submit Feedback'}
-                </button>
-              </form>
-            </div>
+                    {submittingFeedback 
+                      ? 'Saving Feedback...' 
+                      : (courseData?.feedbacks || []).some(f => f.student_id === currentUser.id)
+                        ? 'Update Evaluation'
+                        : 'Submit Feedback'}
+                  </button>
+                </form>
+              </div>
+            )
           )}
 
           {/* Feedback Stats and Reviews History */}

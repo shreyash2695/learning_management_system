@@ -87,13 +87,54 @@ export async function initDatabase() {
             instructor_id INT NOT NULL,
             course_id INT DEFAULT NULL,
             student_id INT DEFAULT NULL,
-            title VARCHAR(200) NOT NULL,
+            title VARCHAR(200) DEFAULT 'Course Enrollment',
             message TEXT NOT NULL,
             is_read TINYINT(1) DEFAULT 0,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             FOREIGN KEY (instructor_id) REFERENCES instructor (instructor_id) ON DELETE CASCADE,
             FOREIGN KEY (course_id) REFERENCES course (course_id) ON DELETE SET NULL,
             FOREIGN KEY (student_id) REFERENCES student (student_id) ON DELETE SET NULL
+          ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+        `);
+
+        // Ensure title column has a default value for existing MySQL tables
+        try {
+          await connection.query("ALTER TABLE instructor_notification MODIFY COLUMN title VARCHAR(200) DEFAULT 'Course Enrollment'");
+        } catch (modErr) {
+          // If column doesn't exist yet, add it
+          try {
+            await connection.query("ALTER TABLE instructor_notification ADD COLUMN title VARCHAR(200) DEFAULT 'Course Enrollment'");
+          } catch {}
+        }
+
+        // 4. Ensure proctor_meeting table exists
+        await connection.query(`
+          CREATE TABLE IF NOT EXISTS proctor_meeting (
+            meeting_id INT AUTO_INCREMENT PRIMARY KEY,
+            student_id INT NOT NULL,
+            proctor_id INT NOT NULL,
+            topic VARCHAR(255) NOT NULL,
+            meeting_date VARCHAR(50) NOT NULL,
+            notes TEXT,
+            status VARCHAR(20) DEFAULT 'REQUESTED',
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (student_id) REFERENCES student (student_id) ON DELETE CASCADE,
+            FOREIGN KEY (proctor_id) REFERENCES proctor (proctor_id) ON DELETE CASCADE
+          ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+        `);
+
+        // 5. Ensure app_notification table exists
+        await connection.query(`
+          CREATE TABLE IF NOT EXISTS app_notification (
+            notification_id INT AUTO_INCREMENT PRIMARY KEY,
+            user_id INT DEFAULT NULL,
+            role VARCHAR(50) DEFAULT 'all',
+            title VARCHAR(255) NOT NULL,
+            message TEXT NOT NULL,
+            type VARCHAR(50) DEFAULT 'INFO',
+            link VARCHAR(255) DEFAULT NULL,
+            is_read TINYINT(1) DEFAULT 0,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
           ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
         `);
       } catch (schemaSyncErr) {
@@ -376,6 +417,7 @@ function migrateAndSeedSqlite(db) {
     CREATE TABLE IF NOT EXISTS instructor_notification (
       notification_id INTEGER PRIMARY KEY AUTOINCREMENT,
       instructor_id   INTEGER NOT NULL,
+      title           TEXT DEFAULT 'Course Enrollment',
       message         TEXT NOT NULL,
       course_id       INTEGER,
       student_id      INTEGER,
@@ -384,6 +426,31 @@ function migrateAndSeedSqlite(db) {
       FOREIGN KEY (instructor_id) REFERENCES instructor(instructor_id) ON DELETE CASCADE,
       FOREIGN KEY (course_id)     REFERENCES course(course_id)         ON DELETE SET NULL,
       FOREIGN KEY (student_id)    REFERENCES student(student_id)       ON DELETE SET NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS proctor_meeting (
+      meeting_id      INTEGER PRIMARY KEY AUTOINCREMENT,
+      student_id      INTEGER NOT NULL,
+      proctor_id      INTEGER NOT NULL,
+      topic           TEXT NOT NULL,
+      meeting_date    TEXT NOT NULL,
+      notes           TEXT,
+      status          TEXT NOT NULL DEFAULT 'REQUESTED' CHECK(status IN ('REQUESTED', 'CONFIRMED', 'COMPLETED', 'CANCELLED')),
+      created_at      TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (student_id) REFERENCES student(student_id) ON DELETE CASCADE,
+      FOREIGN KEY (proctor_id) REFERENCES proctor(proctor_id) ON DELETE CASCADE
+    );
+
+    CREATE TABLE IF NOT EXISTS app_notification (
+      notification_id INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_id         INTEGER,
+      role            TEXT NOT NULL DEFAULT 'all',
+      title           TEXT NOT NULL,
+      message         TEXT NOT NULL,
+      type            TEXT NOT NULL DEFAULT 'INFO',
+      link            TEXT,
+      is_read         INTEGER NOT NULL DEFAULT 0 CHECK(is_read IN (0,1)),
+      created_at      TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
     );
   `);
 
@@ -420,6 +487,11 @@ function migrateAndSeedSqlite(db) {
     const instCols = db.prepare("PRAGMA table_info(instructor)").all().map(c => c.name);
     if (!instCols.includes('password')) {
       db.exec("ALTER TABLE instructor ADD COLUMN password TEXT DEFAULT 'prof123';");
+    }
+
+    const notifCols = db.prepare("PRAGMA table_info(instructor_notification)").all().map(c => c.name);
+    if (!notifCols.includes('title')) {
+      db.exec("ALTER TABLE instructor_notification ADD COLUMN title TEXT DEFAULT 'Course Enrollment';");
     }
   } catch (e) {
     console.warn('[DB Migration Notice]', e.message);
@@ -572,14 +644,14 @@ function seedAllData(db) {
       (1, 'CSE'), (2, 'ECE'), (3, 'MECH'), (4, 'CIVIL'), (5, 'IT');
   `);
 
-  // Proctors
+  // Proctors (Faculty Mentors matching Instructors 201-205)
   db.exec(`
     INSERT OR IGNORE INTO proctor (proctor_id, first_name, middle_name, last_name, cabin_no) VALUES
-      (1, 'Anu', 'M', 'Nair', 'C101'),
-      (2, 'Ravi', 'K', 'Menon', 'C102'),
-      (3, 'Sara', 'L', 'Jose', 'C103'),
-      (4, 'John', 'P', 'Varghese', 'C104'),
-      (5, 'Meera', 'T', 'Das', 'C105');
+      (1, 'Raj', 'M', 'Menon', 'Cabin 401'),
+      (2, 'Anita', 'R', 'Nair', 'I102'),
+      (3, 'Thomas', 'K', 'Jose', 'I103'),
+      (4, 'Divya', 'P', 'Das', 'I104'),
+      (5, 'Vivek', 'S', 'Kumar', 'I105');
   `);
 
   // Proctor phones

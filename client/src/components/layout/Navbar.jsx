@@ -11,12 +11,16 @@ import {
   CheckCircle2,
   Clock,
   LogOut,
-  Lock
+  Lock,
+  Award,
+  FileText
 } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext';
+import { useNotifications } from '../../context/NotificationContext';
 
 export default function Navbar() {
   const { currentUser, logout, isAdmin } = useAuth();
+  const { notifications, unreadCount, markAsRead, markAllAsRead } = useNotifications();
   const location = useLocation();
   const navigate = useNavigate();
   const [showNotifications, setShowNotifications] = useState(false);
@@ -99,50 +103,92 @@ export default function Navbar() {
                 title="Notifications"
               >
                 <Bell className="w-5 h-5" />
-                <span className="absolute top-1.5 right-1.5 w-2 h-2 bg-rose-500 rounded-full ring-2 ring-white"></span>
+                {unreadCount > 0 && (
+                  <span className="absolute -top-1 -right-1 min-w-[18px] h-[18px] px-1 bg-rose-500 text-white text-[10px] font-black rounded-full flex items-center justify-center ring-2 ring-white animate-pulse">
+                    {unreadCount > 9 ? '9+' : unreadCount}
+                  </span>
+                )}
               </button>
 
               {showNotifications && (
-                <div className="absolute right-0 mt-2 w-80 rounded-2xl bg-white shadow-xl border border-slate-200 py-3 z-50 animate-in fade-in zoom-in-95">
-                  <div className="px-4 pb-2 border-b border-slate-100 flex justify-between items-center">
-                    <span className="text-xs font-bold text-slate-900">Academic Notifications</span>
-                    <span className="text-[10px] text-blue-600 font-semibold cursor-pointer">Mark read</span>
+                <div className="absolute right-0 mt-2 w-88 rounded-2xl bg-white shadow-2xl border border-slate-200 py-3 z-50 animate-in fade-in zoom-in-95">
+                  <div className="px-4 pb-2.5 border-b border-slate-100 flex justify-between items-center">
+                    <div className="flex items-center gap-1.5">
+                      <span className="text-xs font-bold text-slate-900">Live Academic Alerts</span>
+                      {unreadCount > 0 && (
+                        <span className="px-1.5 py-0.5 rounded-full bg-rose-100 text-rose-700 text-[10px] font-bold">
+                          {unreadCount} new
+                        </span>
+                      )}
+                    </div>
+                    {unreadCount > 0 && (
+                      <button
+                        onClick={markAllAsRead}
+                        className="text-[10px] text-blue-600 hover:text-blue-800 font-semibold transition-colors"
+                      >
+                        Mark all read
+                      </button>
+                    )}
                   </div>
-                  <div className="divide-y divide-slate-100 max-h-72 overflow-y-auto">
-                    {isAdmin ? (
-                      <>
-                        <div className="p-3 hover:bg-slate-50 transition-colors flex gap-2.5">
-                          <CheckCircle2 className="w-4 h-4 text-emerald-500 shrink-0 mt-0.5" />
-                          <div>
-                            <p className="text-xs font-semibold text-slate-800">Database &amp; Triggers Healthy</p>
-                            <p className="text-[11px] text-slate-500">Relational integrity active across 16 tables</p>
-                          </div>
-                        </div>
-                        <div className="p-3 hover:bg-slate-50 transition-colors flex gap-2.5">
-                          <Clock className="w-4 h-4 text-purple-500 shrink-0 mt-0.5" />
-                          <div>
-                            <p className="text-xs font-semibold text-slate-800">Fall 2026 Registration Open</p>
-                            <p className="text-[11px] text-slate-500">Live student enrollments logged</p>
-                          </div>
-                        </div>
-                      </>
+                  <div className="divide-y divide-slate-100 max-h-80 overflow-y-auto">
+                    {notifications.length === 0 ? (
+                      <div className="p-8 text-center text-slate-400 space-y-1">
+                        <Bell className="w-7 h-7 mx-auto text-slate-300 mb-1" />
+                        <p className="text-xs font-bold text-slate-600">No Notifications</p>
+                        <p className="text-[10px]">You are all caught up with your courses &amp; submissions.</p>
+                      </div>
                     ) : (
-                      <>
-                        <div className="p-3 hover:bg-slate-50 transition-colors flex gap-2.5">
-                          <Clock className="w-4 h-4 text-amber-500 shrink-0 mt-0.5" />
-                          <div>
-                            <p className="text-xs font-semibold text-slate-800">SQL Assignment (DBMS) Due Soon</p>
-                            <p className="text-[11px] text-slate-500">Deadline: 2026-10-01 (100 Marks)</p>
+                      notifications.slice(0, 15).map((n) => {
+                        const getNotifIcon = () => {
+                          switch (n.type) {
+                            case 'GRADE':
+                              return <Award className="w-4 h-4 text-emerald-600" />;
+                            case 'ENROLLMENT':
+                              return <CheckCircle2 className="w-4 h-4 text-blue-600" />;
+                            case 'ASSIGNMENT':
+                            case 'SUBMISSION':
+                              return <FileText className="w-4 h-4 text-purple-600" />;
+                            default:
+                              return <Sparkles className="w-4 h-4 text-amber-500" />;
+                          }
+                        };
+
+                        return (
+                          <div
+                            key={n.notification_id}
+                            onClick={() => {
+                              if (n.is_read === 0) markAsRead(n.notification_id);
+                              if (n.link) {
+                                setShowNotifications(false);
+                                navigate(n.link);
+                              }
+                            }}
+                            className={`p-3.5 hover:bg-slate-50 transition-colors flex gap-3 cursor-pointer ${
+                              n.is_read === 0 ? 'bg-blue-50/40' : ''
+                            }`}
+                          >
+                            <div className="p-1.5 bg-white border border-slate-200 rounded-xl shadow-3xs shrink-0 self-start mt-0.5">
+                              {getNotifIcon()}
+                            </div>
+                            <div className="flex-1 min-w-0">
+                              <div className="flex items-center justify-between gap-1 mb-0.5">
+                                <p className={`text-xs truncate ${n.is_read === 0 ? 'font-bold text-slate-900' : 'font-medium text-slate-700'}`}>
+                                  {n.title}
+                                </p>
+                                {n.is_read === 0 && (
+                                  <span className="w-2 h-2 rounded-full bg-blue-600 shrink-0" />
+                                )}
+                              </div>
+                              <p className="text-[11px] text-slate-500 line-clamp-2 leading-relaxed">
+                                {n.message}
+                              </p>
+                              <span className="text-[9px] text-slate-400 mt-1 block">
+                                {n.created_at ? new Date(n.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : 'Just now'}
+                              </span>
+                            </div>
                           </div>
-                        </div>
-                        <div className="p-3 hover:bg-slate-50 transition-colors flex gap-2.5">
-                          <CheckCircle2 className="w-4 h-4 text-emerald-500 shrink-0 mt-0.5" />
-                          <div>
-                            <p className="text-xs font-semibold text-slate-800">Quiz 1 Published</p>
-                            <p className="text-[11px] text-slate-500">DBMS Quiz available for study</p>
-                          </div>
-                        </div>
-                      </>
+                        );
+                      })
                     )}
                   </div>
                 </div>

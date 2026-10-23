@@ -14,12 +14,17 @@ import {
   BookOpen,
   Sparkles,
   Users,
-  Check
+  Check,
+  Paperclip,
+  ExternalLink,
+  Eye
 } from 'lucide-react';
 import { lmsApi } from '../services/api';
 import { useAuth } from '../context/AuthContext';
 import Badge from '../components/common/Badge';
 import Modal from '../components/common/Modal';
+import DocumentCodeViewer from '../components/common/DocumentCodeViewer';
+import SubmissionContentRenderer from '../components/common/SubmissionContentRenderer';
 
 export default function Submissions() {
   const { currentUser, isStudent, isInstructor, isAdmin } = useAuth();
@@ -34,6 +39,9 @@ export default function Submissions() {
   const [selectedCourse, setSelectedCourse] = useState(initialCourseId);
   const [selectedAssignment, setSelectedAssignment] = useState(initialAssignmentId);
   const [statusFilter, setStatusFilter] = useState(isStudent ? 'MY' : 'ALL'); // 'ALL', 'PENDING', 'GRADED', 'MY'
+
+  // Inspect / Preview Modal State
+  const [previewSub, setPreviewSub] = useState(null);
 
   // Grading Modal State
   const [gradingSub, setGradingSub] = useState(null);
@@ -75,10 +83,11 @@ export default function Submissions() {
   const fetchSubmissions = () => {
     setLoading(true);
     const instId = isInstructor ? currentUser.id : null;
+    const stuId = isStudent ? currentUser.id : null;
     const cId = selectedCourse !== 'ALL' ? selectedCourse : null;
     const aId = selectedAssignment !== 'ALL' ? selectedAssignment : null;
 
-    lmsApi.getSubmissions(instId, cId, aId)
+    lmsApi.getSubmissions(instId, cId, aId, null, stuId)
       .then(res => setSubmissions(res.submissions || []))
       .catch(err => console.error('Error fetching submissions:', err))
       .finally(() => setLoading(false));
@@ -404,10 +413,8 @@ export default function Submissions() {
 
                       {/* Submission Solution Preview */}
                       <td className="px-6 py-4 max-w-xs">
-                        <div className="bg-slate-50 p-2 rounded-xl border border-slate-100 font-mono text-[11px] text-slate-800 line-clamp-2" title={sub.submission_content}>
-                          {sub.submission_content || 'Completed coursework solution.'}
-                        </div>
-                        <span className="text-[10px] text-slate-400 flex items-center gap-1 mt-1">
+                        <SubmissionContentRenderer content={sub.submission_content} compact={true} />
+                        <span className="text-[10px] text-slate-400 flex items-center gap-1 mt-1.5">
                           <Calendar className="w-3 h-3" /> Submitted: {sub.submission_date}
                         </span>
                         {sub.instructor_feedback && (
@@ -450,27 +457,37 @@ export default function Submissions() {
                         )}
                       </td>
 
-                      {/* Action Button: Evaluate / Grade (Faculty only) */}
+                      {/* Action Buttons: Preview and Evaluate / Grade (Faculty) */}
                       <td className="px-6 py-4 text-right">
-                        {canGrade ? (
+                        <div className="flex items-center justify-end gap-2">
                           <button
-                            onClick={() => openGradingModal(sub)}
-                            className={`px-3.5 py-1.5 rounded-xl font-bold text-xs flex items-center gap-1.5 ml-auto transition-all shadow-xs ${
-                              isGraded
-                                ? 'bg-purple-50 hover:bg-purple-100 text-purple-700 border border-purple-200'
-                                : 'bg-amber-500 hover:bg-amber-600 text-white shadow-amber-500/20'
-                            }`}
+                            type="button"
+                            onClick={() => setPreviewSub(sub)}
+                            title="Inspect & Preview Solution"
+                            className="px-2.5 py-1.5 rounded-xl text-xs font-bold transition-all flex items-center gap-1.5 bg-slate-100 hover:bg-slate-200 text-slate-700 hover:text-slate-900 border border-slate-200"
                           >
-                            <Edit3 className="w-3.5 h-3.5" />
-                            {isGraded ? 'Edit Grade' : 'Evaluate & Grade'}
+                            <Eye className="w-3.5 h-3.5 text-slate-500" />
+                            <span>Preview</span>
                           </button>
-                        ) : isAdmin ? (
-                          <span className="text-xs font-semibold text-slate-500">
-                            {isGraded ? `Awarded: ${sub.marks_obtained}/${sub.marks}` : 'Awaiting Faculty Grade'}
-                          </span>
-                        ) : (
-                          <span className="text-[11px] text-slate-400">—</span>
-                        )}
+
+                          {canGrade ? (
+                            <button
+                              onClick={() => openGradingModal(sub)}
+                              className={`px-3 py-1.5 rounded-xl font-bold text-xs flex items-center gap-1.5 transition-all shadow-xs ${
+                                isGraded
+                                  ? 'bg-purple-50 hover:bg-purple-100 text-purple-700 border border-purple-200'
+                                  : 'bg-amber-500 hover:bg-amber-600 text-white shadow-amber-500/20'
+                              }`}
+                            >
+                              <Edit3 className="w-3.5 h-3.5" />
+                              {isGraded ? 'Edit Grade' : 'Grade'}
+                            </button>
+                          ) : isAdmin ? (
+                            <span className="text-xs font-semibold text-slate-500">
+                              {isGraded ? `${sub.marks_obtained}/${sub.marks}` : 'Ungraded'}
+                            </span>
+                          ) : null}
+                        </div>
                       </td>
                     </tr>
                   );
@@ -493,11 +510,70 @@ export default function Submissions() {
         </div>
       )}
 
+      {/* Dedicated Preview & Inspector Modal (All Roles) */}
+      <Modal
+        isOpen={!!previewSub}
+        onClose={() => setPreviewSub(null)}
+        title={previewSub ? `Submission Inspection: ${previewSub.assignment_name}` : 'Submission Preview'}
+        maxWidth="max-w-4xl"
+      >
+        {previewSub && (
+          <div className="space-y-4">
+            {/* Metadata bar */}
+            <div className="p-3.5 bg-slate-50 rounded-2xl border border-slate-200 text-xs flex flex-wrap items-center justify-between gap-3">
+              <div className="space-y-0.5">
+                <span className="font-bold text-slate-900 block text-sm">
+                  {previewSub.assignment_name} — {previewSub.course_name}
+                </span>
+                <span className="text-slate-500">
+                  Student: <strong>{previewSub.first_name} {previewSub.last_name}</strong> (Roll #{previewSub.student_id}) • Submitted {previewSub.submission_date}
+                </span>
+              </div>
+              <div className="flex items-center gap-2">
+                {previewSub.status === 'Graded' ? (
+                  <Badge variant="green" className="font-bold">
+                    Score: {previewSub.marks_obtained} / {previewSub.marks} Marks
+                  </Badge>
+                ) : (
+                  <Badge variant="amber">Awaiting Faculty Evaluation</Badge>
+                )}
+              </div>
+            </div>
+
+            {/* Document / Code / File Viewer */}
+            <DocumentCodeViewer
+              content={previewSub.submission_content}
+              filename={previewSub.assignment_name}
+              height="h-[460px]"
+            />
+
+            {/* Feedback display if graded */}
+            {previewSub.instructor_feedback && (
+              <div className="p-3.5 bg-purple-50/70 border border-purple-100 rounded-xl text-xs text-purple-900">
+                <span className="font-bold block mb-1 text-purple-950">Faculty Evaluation Remarks:</span>
+                <p className="italic text-purple-800 font-medium">"{previewSub.instructor_feedback}"</p>
+              </div>
+            )}
+
+            <div className="flex justify-end pt-2 border-t border-slate-100">
+              <button
+                type="button"
+                onClick={() => setPreviewSub(null)}
+                className="px-4 py-2 rounded-xl text-xs font-bold text-slate-700 hover:bg-slate-100 border border-slate-200"
+              >
+                Close Inspector
+              </button>
+            </div>
+          </div>
+        )}
+      </Modal>
+
       {/* Grade Submission Modal (Instructor only) */}
       <Modal
         isOpen={isInstructor && !!gradingSub}
         onClose={() => setGradingSub(null)}
         title={`Faculty Evaluation & Grading`}
+        maxWidth="max-w-5xl"
       >
         {gradingNotice ? (
           <div className="py-6 text-center space-y-2">
@@ -508,133 +584,142 @@ export default function Submissions() {
             <p className="text-xs text-slate-600">{gradingNotice}</p>
           </div>
         ) : (
-          <form onSubmit={handleGradeSubmit} className="space-y-4">
-            {/* Student & Course Summary Banner */}
-            <div className="p-4 bg-purple-50/80 rounded-2xl border border-purple-100 text-xs text-purple-900 space-y-1.5">
-              <div className="flex items-center justify-between border-b border-purple-200/60 pb-1.5">
-                <span className="font-bold text-purple-950 text-sm">
-                  {gradingSub?.assignment_name}
-                </span>
-                <span className="font-bold px-2 py-0.5 bg-purple-200/80 text-purple-900 rounded-lg">
-                  Max: {gradingSub?.marks} Marks
-                </span>
-              </div>
-              <div className="grid grid-cols-2 gap-2 pt-1 text-[11px]">
-                <p><strong>Student:</strong> {gradingSub?.first_name} {gradingSub?.last_name} (#{gradingSub?.student_id})</p>
-                <p><strong>Course:</strong> {gradingSub?.course_name} (#{gradingSub?.course_id})</p>
-                <p><strong>Submitted On:</strong> {gradingSub?.submission_date}</p>
-                <p><strong>Status:</strong> {gradingSub?.status}</p>
-              </div>
-            </div>
-
-            {/* Student's Submitted Content Box */}
-            <div>
-              <label className="block text-xs font-bold text-slate-700 mb-1">
-                Student's Submitted Solution / Code / Notes
+          <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
+            {/* Left Column: Solution Previewer */}
+            <div className="lg:col-span-7 flex flex-col">
+              <label className="text-xs font-bold text-slate-700 mb-2 flex items-center gap-1.5">
+                <Sparkles className="w-3.5 h-3.5 text-purple-600" />
+                Submitted Coursework Preview
               </label>
-              <div className="p-3 bg-slate-50 rounded-xl border border-slate-200 text-xs font-mono text-slate-800 max-h-36 overflow-y-auto whitespace-pre-wrap">
-                {gradingSub?.submission_content || 'No text notes provided with file upload.'}
+              <div className="flex-1 min-h-[400px]">
+                <DocumentCodeViewer
+                  content={gradingSub?.submission_content}
+                  filename={gradingSub?.assignment_name}
+                  height="h-[460px]"
+                />
               </div>
             </div>
 
-            {/* Marks Input */}
-            <div>
-              <div className="flex items-center justify-between mb-1">
-                <label className="text-xs font-bold text-slate-700">
-                  Marks Obtained <span className="text-rose-500">*</span>
-                </label>
-                <span className="text-[11px] font-bold text-purple-700">
-                  Allowed Range: 0 to {gradingSub?.marks}
-                </span>
-              </div>
-              <input
-                type="number"
-                min="0"
-                max={gradingSub?.marks}
-                value={gradeMarks}
-                onChange={(e) => setGradeMarks(e.target.value)}
-                placeholder={`Enter marks (0 - ${gradingSub?.marks})`}
-                className="w-full px-3.5 py-2.5 rounded-xl border border-slate-200 text-sm font-bold text-slate-900 focus:ring-2 focus:ring-purple-500/20 focus:border-purple-500"
-                required
-                autoFocus
-              />
-              <span className="text-[10px] text-slate-400 mt-1 block">
-                Enforced by SQL Trigger <code>trg_submission_marks_check_update</code>.
-              </span>
-            </div>
+            {/* Right Column: Grading Controls */}
+            <div className="lg:col-span-5">
+              <form onSubmit={handleGradeSubmit} className="space-y-4">
+                {/* Student & Course Summary Banner */}
+                <div className="p-3.5 bg-purple-50/80 rounded-2xl border border-purple-100 text-xs text-purple-900 space-y-1">
+                  <div className="flex items-center justify-between border-b border-purple-200/60 pb-1.5">
+                    <span className="font-bold text-purple-950 text-sm truncate max-w-[180px]">
+                      {gradingSub?.assignment_name}
+                    </span>
+                    <span className="font-bold px-2 py-0.5 bg-purple-200/80 text-purple-900 rounded-lg shrink-0">
+                      Max: {gradingSub?.marks} Marks
+                    </span>
+                  </div>
+                  <div className="space-y-0.5 pt-1 text-[11px]">
+                    <p><strong>Student:</strong> {gradingSub?.first_name} {gradingSub?.last_name} (#{gradingSub?.student_id})</p>
+                    <p><strong>Course:</strong> {gradingSub?.course_name} (#{gradingSub?.course_id})</p>
+                    <p><strong>Submitted On:</strong> {gradingSub?.submission_date}</p>
+                  </div>
+                </div>
 
-            {/* Instructor Remarks & Feedback */}
-            <div>
-              <div className="flex justify-between items-center mb-1">
-                <label className="text-xs font-bold text-slate-700">
-                  Instructor Remarks / Constructive Feedback <span className="text-rose-500">*</span>
-                </label>
-                <span className="text-[10px] text-slate-400 font-medium">Recorded in submits.instructor_feedback</span>
-              </div>
-              
-              {/* Quick preset buttons */}
-              <div className="flex flex-wrap gap-1.5 mb-2">
-                <button
-                  type="button"
-                  onClick={() => handleQuickFeedback('Outstanding solution! Query execution plan and relational design are well executed.')}
-                  className="px-2 py-1 bg-slate-100 hover:bg-purple-100 hover:text-purple-700 text-slate-600 rounded-lg text-[10px] font-medium transition-colors"
-                >
-                  ⭐ Outstanding
-                </button>
-                <button
-                  type="button"
-                  onClick={() => handleQuickFeedback('Good effort. Review BCNF normal form decomposition for further optimization.')}
-                  className="px-2 py-1 bg-slate-100 hover:bg-purple-100 hover:text-purple-700 text-slate-600 rounded-lg text-[10px] font-medium transition-colors"
-                >
-                  👍 Good with remarks
-                </button>
-                <button
-                  type="button"
-                  onClick={() => handleQuickFeedback('Incomplete submission. Missing relational algebra and SQL DDL statements.')}
-                  className="px-2 py-1 bg-slate-100 hover:bg-rose-100 hover:text-rose-700 text-slate-600 rounded-lg text-[10px] font-medium transition-colors"
-                >
-                  ⚠️ Incomplete
-                </button>
-              </div>
+                {/* Marks Input */}
+                <div>
+                  <div className="flex items-center justify-between mb-1">
+                    <label className="text-xs font-bold text-slate-700">
+                      Marks Obtained <span className="text-rose-500">*</span>
+                    </label>
+                    <span className="text-[11px] font-bold text-purple-700">
+                      Allowed: 0 to {gradingSub?.marks}
+                    </span>
+                  </div>
+                  <input
+                    type="number"
+                    min="0"
+                    max={gradingSub?.marks}
+                    value={gradeMarks}
+                    onChange={(e) => setGradeMarks(e.target.value)}
+                    placeholder={`Enter marks (0 - ${gradingSub?.marks})`}
+                    className="w-full px-3.5 py-2.5 rounded-xl border border-slate-200 text-sm font-bold text-slate-900 focus:ring-2 focus:ring-purple-500/20 focus:border-purple-500"
+                    required
+                    autoFocus
+                  />
+                  <span className="text-[10px] text-slate-400 mt-1 block">
+                    Trigger <code>trg_submission_marks_check_update</code> enforces valid range.
+                  </span>
+                </div>
 
-              <textarea
-                rows="3"
-                value={gradeFeedback}
-                onChange={(e) => setGradeFeedback(e.target.value)}
-                placeholder="Type constructive evaluation feedback for the student..."
-                className="w-full px-3 py-2 rounded-xl border border-slate-200 text-xs focus:ring-2 focus:ring-purple-500/20 focus:border-purple-500"
-                required
-              />
-            </div>
+                {/* Instructor Remarks & Feedback */}
+                <div>
+                  <div className="flex justify-between items-center mb-1">
+                    <label className="text-xs font-bold text-slate-700">
+                      Instructor Remarks <span className="text-rose-500">*</span>
+                    </label>
+                    <span className="text-[10px] text-slate-400 font-medium">Recorded in submits</span>
+                  </div>
+                  
+                  {/* Quick preset buttons */}
+                  <div className="flex flex-wrap gap-1.5 mb-2">
+                    <button
+                      type="button"
+                      onClick={() => handleQuickFeedback('Outstanding solution! Query execution plan and relational design are well executed.')}
+                      className="px-2 py-0.5 bg-slate-100 hover:bg-purple-100 hover:text-purple-700 text-slate-600 rounded-lg text-[10px] font-medium transition-colors"
+                    >
+                      ⭐ Outstanding
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => handleQuickFeedback('Good effort. Review BCNF normal form decomposition for further optimization.')}
+                      className="px-2 py-0.5 bg-slate-100 hover:bg-purple-100 hover:text-purple-700 text-slate-600 rounded-lg text-[10px] font-medium transition-colors"
+                    >
+                      👍 Good remarks
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => handleQuickFeedback('Incomplete submission. Missing relational algebra and SQL DDL statements.')}
+                      className="px-2 py-0.5 bg-slate-100 hover:bg-rose-100 hover:text-rose-700 text-slate-600 rounded-lg text-[10px] font-medium transition-colors"
+                    >
+                      ⚠️ Incomplete
+                    </button>
+                  </div>
 
-            {/* Modal Actions */}
-            <div className="flex justify-end gap-2 pt-3 border-t border-slate-100">
-              <button
-                type="button"
-                onClick={() => setGradingSub(null)}
-                className="px-4 py-2 rounded-xl text-xs font-bold text-slate-600 hover:bg-slate-100"
-              >
-                Cancel
-              </button>
-              <button
-                type="submit"
-                disabled={gradingLoading}
-                className="px-5 py-2 rounded-xl text-xs font-bold bg-purple-600 hover:bg-purple-700 text-white shadow-md shadow-purple-600/20 disabled:opacity-50 flex items-center gap-1.5"
-              >
-                {gradingLoading ? (
-                  <>
-                    <div className="w-3.5 h-3.5 border-2 border-white border-t-transparent rounded-full animate-spin"></div>
-                    Saving Grade...
-                  </>
-                ) : (
-                  <>
-                    <Check className="w-3.5 h-3.5" />
-                    Save Grade &amp; Feedback
-                  </>
-                )}
-              </button>
+                  <textarea
+                    rows="3"
+                    value={gradeFeedback}
+                    onChange={(e) => setGradeFeedback(e.target.value)}
+                    placeholder="Type constructive evaluation feedback for the student..."
+                    className="w-full px-3 py-2 rounded-xl border border-slate-200 text-xs focus:ring-2 focus:ring-purple-500/20 focus:border-purple-500"
+                    required
+                  />
+                </div>
+
+                {/* Modal Actions */}
+                <div className="flex justify-end gap-2 pt-3 border-t border-slate-100">
+                  <button
+                    type="button"
+                    onClick={() => setGradingSub(null)}
+                    className="px-4 py-2 rounded-xl text-xs font-bold text-slate-600 hover:bg-slate-100"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    type="submit"
+                    disabled={gradingLoading}
+                    className="px-5 py-2 rounded-xl text-xs font-bold bg-purple-600 hover:bg-purple-700 text-white shadow-md shadow-purple-600/20 disabled:opacity-50 flex items-center gap-1.5"
+                  >
+                    {gradingLoading ? (
+                      <>
+                        <div className="w-3.5 h-3.5 border-2 border-white border-t-transparent rounded-full animate-spin"></div>
+                        Saving Grade...
+                      </>
+                    ) : (
+                      <>
+                        <Check className="w-3.5 h-3.5" />
+                        Save Grade &amp; Feedback
+                      </>
+                    )}
+                  </button>
+                </div>
+              </form>
             </div>
-          </form>
+          </div>
         )}
       </Modal>
     </div>

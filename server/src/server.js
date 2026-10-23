@@ -1,19 +1,35 @@
 import express from 'express';
 import cors from 'cors';
 import dotenv from 'dotenv';
+import path from 'path';
+import fs from 'fs';
+import { fileURLToPath } from 'url';
 import { initDatabase, getDatabaseType } from './config/db.js';
 import lmsRoutes from './routes/lmsRoutes.js';
 import crudRoutes from './routes/crudRoutes.js';
 import authRoutes from './routes/authRoutes.js';
+import graphRoutes from './routes/graphRoutes.js';
+import notificationRoutes from './routes/notificationRoutes.js';
 
 dotenv.config();
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+const clientDistPath = path.resolve(__dirname, '../../client/dist');
+const uploadsDir = path.resolve(__dirname, '../uploads');
+
+if (!fs.existsSync(uploadsDir)) {
+  fs.mkdirSync(uploadsDir, { recursive: true });
+}
 
 const app = express();
 const PORT = process.env.PORT || 5001;
 
 // Middleware
 app.use(cors());
-app.use(express.json());
+app.use(express.json({ limit: '25mb' }));
+app.use(express.urlencoded({ extended: true, limit: '25mb' }));
+app.use('/uploads', express.static(uploadsDir));
 
 // Request logger for development transparency
 app.use((req, res, next) => {
@@ -25,6 +41,8 @@ app.use((req, res, next) => {
 app.use('/api/auth', authRoutes);
 app.use('/api/lms', lmsRoutes);
 app.use('/api/crud', crudRoutes);
+app.use('/api/graph', graphRoutes);
+app.use('/api/notifications', notificationRoutes);
 
 // Health check & System info
 app.get('/api/health', (req, res) => {
@@ -34,14 +52,6 @@ app.get('/api/health', (req, res) => {
     database: getDatabaseType()
   });
 });
-
-import path from 'path';
-import fs from 'fs';
-import { fileURLToPath } from 'url';
-
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
-const clientDistPath = path.resolve(__dirname, '../../client/dist');
 
 // Serve built frontend if available
 if (fs.existsSync(clientDistPath)) {

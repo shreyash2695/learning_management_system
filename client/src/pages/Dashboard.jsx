@@ -33,9 +33,27 @@ import {
   XCircle,
   ClipboardList
 } from 'lucide-react';
-import { lmsApi } from '../services/api';
+import { lmsApi, crudApi } from '../services/api';
 import { useAuth } from '../context/AuthContext';
 import Badge from '../components/common/Badge';
+import Modal from '../components/common/Modal';
+import SubmissionContentRenderer from '../components/common/SubmissionContentRenderer';
+
+function formatNotificationMessage(msg) {
+  if (!msg) return '';
+  if (typeof msg === 'string' && msg.startsWith('[PROCTOR_MEET]')) {
+    try {
+      const data = JSON.parse(msg.replace(/^\[PROCTOR_MEET\]/, ''));
+      if (data.initiated_by === 'PROCTOR') {
+        return `Mentorship Summon: Meeting with ${data.student_name || 'ward'} scheduled on ${data.scheduled_time || data.preferred_time} at ${data.venue || 'Cabin 401'} (Topic: ${data.topic}).`;
+      }
+      return `Mentorship Request: ${data.student_name || 'Student'} requested a meeting regarding "${data.topic}" (Preferred: ${data.preferred_time || data.scheduled_time}).`;
+    } catch {
+      return msg.replace(/^\[PROCTOR_MEET\]/, '');
+    }
+  }
+  return msg;
+}
 
 // ==========================================
 // 1. ADMINISTRATOR DASHBOARD COMPONENT
@@ -1011,16 +1029,15 @@ function AdminDashboard({ data = {} }) {
                           </td>
                           <td className="px-5 py-4">
                             {req.proctor_approved ? (
-                              <span className="flex items-center gap-1 text-emerald-600 font-bold text-[11px]"><CheckCircle2 className="w-3.5 h-3.5" /> Done</span>
+                              <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-emerald-50 text-emerald-700 border border-emerald-200 text-[10px] font-bold">
+                                <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600" /> Proctor Approved
+                              </span>
                             ) : req.status === 'REJECTED' ? (
                               <span className="text-slate-400 text-[11px]">—</span>
                             ) : (
-                              <button
-                                onClick={() => handleApproveRequest(req.request_id, 'proctor_approve')}
-                                className="flex items-center gap-1 px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white text-[11px] font-bold transition-colors"
-                              >
-                                <ThumbsUp className="w-3 h-3" /> Approve
-                              </button>
+                              <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-amber-50 text-amber-700 border border-amber-200 text-[10px] font-bold" title="Independent gate: faculty proctor must approve from their proctor portal">
+                                <Clock className="w-3 h-3 text-amber-500" /> Awaiting Proctor
+                              </span>
                             )}
                           </td>
                           <td className="px-5 py-4">
@@ -1051,9 +1068,22 @@ function AdminDashboard({ data = {} }) {
 // 2. INSTRUCTOR / FACULTY DASHBOARD COMPONENT
 // Focuses on teaching courses, students in class, submissions to review, feedback
 // ==========================================
-function InstructorDashboard({ data = {} }) {
-  const { instructor = {}, teachingCourses = [], enrolledStudents = [], submissionsToReview = [], feedbacks = [], metrics = {} } = data || {};
+function InstructorDashboard({ data = {}, onRefresh }) {
+  const { 
+    instructor = {}, 
+    teachingCourses = [], 
+    enrolledStudents = [], 
+    submissionsToReview = [], 
+    feedbacks = [], 
+    metrics = {},
+    proctorPortfolio = {}
+  } = data || {};
+  const { proctorWards = [], proctorProfile = {}, proctorPendingRequests = [] } = proctorPortfolio || {};
   const { currentUser } = useAuth();
+
+  // Wards view & dossier state
+  const [selectedWard, setSelectedWard] = useState(null);
+  const [wardSearch, setWardSearch] = useState('');
 
   // Instructor notifications state
   const [notifications, setNotifications] = useState([]);
@@ -1075,6 +1105,148 @@ function InstructorDashboard({ data = {} }) {
     await lmsApi.markNotificationRead(notifId);
     setNotifications(prev => prev.map(n => n.notification_id === notifId ? { ...n, is_read: 1 } : n));
     setUnreadCount(prev => Math.max(0, prev - 1));
+  };
+
+  // Mentorship Meetings State (Option 1 via instructor_notification)
+  const [proctorMeetings, setProctorMeetings] = useState([]);
+  const [isScheduleOpen, setIsScheduleOpen] = useState(false);
+  const [scheduleStudentId, setScheduleStudentId] = useState('');
+  const [scheduleTopic, setScheduleTopic] = useState('Academic Performance & CGPA Advisory');
+  const [scheduleTime, setScheduleTime] = useState('');
+  const [scheduleVenue, setScheduleVenue] = useState(instructor?.cabin_no || 'Cabin 401');
+  const [scheduleNotes, setScheduleNotes] = useState('');
+  const [scheduleLoading, setScheduleLoading] = useState(false);
+  const [actionNotice, setActionNotice] = useState(null);
+
+  // Conclude meeting modal
+  const [completingMeeting, setCompletingMeeting] = useState(null);
+  const [advisoryNotesInput, setAdvisoryNotesInput] = useState('');
+  const [completingLoading, setCompletingLoading] = useState(false);
+
+  // Accept meeting modal
+  const [acceptingMeeting, setAcceptingMeeting] = useState(null);
+  const [acceptScheduledTime, setAcceptScheduledTime] = useState('');
+  const [acceptVenue, setAcceptVenue] = useState(instructor?.cabin_no || 'Cabin 401');
+  const [acceptLoading, setAcceptLoading] = useState(false);
+
+  const loadProctorMeetings = () => {
+    if (!currentUser?.id) return;
+    lmsApi.getProctorMeetings('instructor', currentUser.id)
+      .then(res => setProctorMeetings(res.meetings || []))
+      .catch(() => {});
+  };
+
+  const handleProctorApproveEnrollment = async (requestId, action) => {
+    try {
+      const res = await lmsApi.approveEnrollmentRequest(requestId, action === 'approve' ? 'proctor_approve' : 'reject');
+      setActionNotice({ type: 'success', message: res.message || 'Enrollment request processed!' });
+      if (onRefresh) onRefresh();
+    } catch (err) {
+      setActionNotice({ type: 'error', message: err.message });
+    } finally {
+      setTimeout(() => setActionNotice(null), 4000);
+    }
+  };
+
+  const handleAcceptConfirmSubmit = async (e) => {
+    if (e && e.preventDefault) e.preventDefault();
+    if (!acceptingMeeting) return;
+    setAcceptLoading(true);
+    try {
+      const res = await lmsApi.updateProctorMeeting(acceptingMeeting.id, {
+        action: 'accept',
+        scheduled_time: acceptScheduledTime || 'Friday 3:00 PM',
+        venue: acceptVenue || instructor?.cabin_no || 'Cabin 401'
+      });
+      setActionNotice({ type: 'success', message: res.message });
+      setAcceptingMeeting(null);
+      loadProctorMeetings();
+    } catch (err) {
+      setActionNotice({ type: 'error', message: err.message });
+    } finally {
+      setAcceptLoading(false);
+      setTimeout(() => setActionNotice(null), 4000);
+    }
+  };
+
+  useEffect(() => {
+    loadProctorMeetings();
+  }, [currentUser?.id]);
+
+  const handleScheduleSubmit = async (e) => {
+    e.preventDefault();
+    if (!scheduleStudentId) return;
+    setScheduleLoading(true);
+    try {
+      const res = await lmsApi.scheduleProctorMeeting({
+        instructor_id: currentUser.id,
+        student_id: parseInt(scheduleStudentId, 10),
+        topic: scheduleTopic,
+        scheduled_time: scheduleTime || 'This Friday at 11:00 AM',
+        venue: scheduleVenue || 'Cabin 401',
+        notes: scheduleNotes || 'Periodic mentorship checkup'
+      });
+      setActionNotice({ type: 'success', message: res.message });
+      setIsScheduleOpen(false);
+      setScheduleNotes('');
+      setScheduleTime('');
+      setScheduleStudentId('');
+      loadProctorMeetings();
+    } catch (err) {
+      setActionNotice({ type: 'error', message: err.message });
+    } finally {
+      setScheduleLoading(false);
+      setTimeout(() => setActionNotice(null), 4000);
+    }
+  };
+
+  const handleAcceptWardMeet = async (meetingId, scheduledTime = 'Friday 3:00 PM @ Cabin 401') => {
+    try {
+      const res = await lmsApi.updateProctorMeeting(meetingId, {
+        action: 'accept',
+        scheduled_time: scheduledTime,
+        venue: instructor?.cabin_no || 'Cabin 401'
+      });
+      setActionNotice({ type: 'success', message: res.message });
+      loadProctorMeetings();
+    } catch (err) {
+      setActionNotice({ type: 'error', message: err.message });
+    } finally {
+      setTimeout(() => setActionNotice(null), 4000);
+    }
+  };
+
+  const handleDeclineWardMeet = async (meetingId) => {
+    try {
+      const res = await lmsApi.updateProctorMeeting(meetingId, { action: 'cancel' });
+      setActionNotice({ type: 'success', message: res.message });
+      loadProctorMeetings();
+    } catch (err) {
+      setActionNotice({ type: 'error', message: err.message });
+    } finally {
+      setTimeout(() => setActionNotice(null), 4000);
+    }
+  };
+
+  const handleCompleteMeetSubmit = async (e) => {
+    e.preventDefault();
+    if (!completingMeeting) return;
+    setCompletingLoading(true);
+    try {
+      const res = await lmsApi.updateProctorMeeting(completingMeeting.id, {
+        action: 'complete',
+        advisory_notes: advisoryNotesInput || 'Meeting concluded. Ward advised on coursework progress.'
+      });
+      setActionNotice({ type: 'success', message: res.message });
+      setCompletingMeeting(null);
+      setAdvisoryNotesInput('');
+      loadProctorMeetings();
+    } catch (err) {
+      setActionNotice({ type: 'error', message: err.message });
+    } finally {
+      setCompletingLoading(false);
+      setTimeout(() => setActionNotice(null), 4000);
+    }
   };
 
   return (
@@ -1111,8 +1283,8 @@ function InstructorDashboard({ data = {} }) {
         </div>
       </div>
 
-      {/* 4 Faculty Specific Metrics */}
-      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-5">
+      {/* 5 Faculty & Proctor Specific Metrics */}
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-4">
         <div className="bg-white p-5 rounded-2xl border border-slate-200 shadow-xs">
           <div className="flex items-center justify-between">
             <span className="text-xs font-bold text-slate-400 uppercase tracking-wider">Courses Taught</span>
@@ -1156,6 +1328,17 @@ function InstructorDashboard({ data = {} }) {
           <div className="mt-3 text-3xl font-extrabold text-purple-700">{metrics.totalFeedbackReceived}</div>
           <p className="text-xs text-slate-500 mt-1">Logged student evaluations</p>
         </div>
+
+        <div className="bg-white p-5 rounded-2xl border border-slate-200 shadow-xs">
+          <div className="flex items-center justify-between">
+            <span className="text-xs font-bold text-slate-400 uppercase tracking-wider">Proctor Wards</span>
+            <div className="p-2.5 rounded-xl bg-indigo-50 text-indigo-600">
+              <ShieldCheck className="w-5 h-5" />
+            </div>
+          </div>
+          <div className="mt-3 text-3xl font-extrabold text-indigo-700">{metrics.totalProctorWards || proctorWards.length}</div>
+          <p className="text-xs text-slate-500 mt-1">Assigned faculty mentorship wards</p>
+        </div>
       </div>
 
       {/* Notifications Panel */}
@@ -1189,7 +1372,7 @@ function InstructorDashboard({ data = {} }) {
                       {n.student_name ? n.student_name[0] : '?'}
                     </div>
                     <div>
-                      <p className="text-xs font-semibold text-slate-800">{n.message}</p>
+                      <p className="text-xs font-semibold text-slate-800">{formatNotificationMessage(n.message)}</p>
                       <p className="text-[10px] text-slate-400 mt-0.5">{new Date(n.created_at).toLocaleString()}</p>
                     </div>
                   </div>
@@ -1210,6 +1393,312 @@ function InstructorDashboard({ data = {} }) {
           )}
         </div>
       )}
+
+      {/* Action Notice */}
+      {actionNotice && (
+        <div className={`p-4 rounded-2xl text-xs font-semibold ${actionNotice.type === 'success' ? 'bg-emerald-50 text-emerald-800 border border-emerald-200' : 'bg-rose-50 text-rose-800 border border-rose-200'}`}>
+          {actionNotice.message}
+        </div>
+      )}
+
+      {/* Faculty Proctor Directorate & Assigned Wards Portfolio */}
+      <div className="bg-white rounded-3xl border border-slate-200 shadow-xs p-6 space-y-5">
+        <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
+          <div className="flex items-center gap-3">
+            <div className="p-3 rounded-2xl bg-indigo-50 text-indigo-700 shadow-xs">
+              <ShieldCheck className="w-6 h-6" />
+            </div>
+            <div>
+              <div className="flex items-center gap-2">
+                <h3 className="font-extrabold text-base sm:text-lg text-slate-900">
+                  My Assigned Student Wards ({proctorWards.length})
+                </h3>
+                <span className="px-2.5 py-0.5 rounded-full bg-indigo-100 text-indigo-800 font-bold text-[10px]">
+                  Official Proctor Unit #{proctorProfile.proctor_id || 1}
+                </span>
+              </div>
+              <p className="text-xs text-slate-500 mt-0.5">
+                You are the appointed University Faculty Proctor for these students. Review academic standing, CGPA, study hours, submissions, and issue advisory or summons.
+              </p>
+            </div>
+          </div>
+
+          <div className="flex items-center gap-2 self-start sm:self-auto">
+            <div className="relative">
+              <Search className="w-3.5 h-3.5 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
+              <input
+                type="text"
+                value={wardSearch}
+                onChange={(e) => setWardSearch(e.target.value)}
+                placeholder="Search wards..."
+                className="pl-8 pr-3 py-1.5 rounded-xl border border-slate-200 text-xs focus:ring-2 focus:ring-blue-500/20 font-medium"
+              />
+            </div>
+          </div>
+        </div>
+
+        {/* Pending Proctor Course Approvals Alert */}
+        {proctorPendingRequests.length > 0 && (
+          <div className="p-4 bg-amber-50 border border-amber-200 rounded-2xl">
+            <div className="flex items-center justify-between mb-2">
+              <span className="font-extrabold text-xs text-amber-900 flex items-center gap-1.5">
+                <AlertCircle className="w-4 h-4 text-amber-600" />
+                Pending Course Registration Approvals ({proctorPendingRequests.length})
+              </span>
+              <span className="text-[10px] text-amber-700">Requires Proctor Approval</span>
+            </div>
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+              {proctorPendingRequests.map((req) => (
+                <div key={req.request_id} className="p-3 bg-white rounded-xl border border-amber-200 flex items-center justify-between gap-3 text-xs">
+                  <div>
+                    <span className="font-bold text-slate-900">{req.student_name}</span>
+                    <span className="text-slate-500 text-[11px] block">
+                      Course: <strong>{req.course_name}</strong> • CGPA: {req.cgpa || '8.5'}
+                    </span>
+                  </div>
+                  <div className="flex items-center gap-1.5 shrink-0">
+                    <button
+                      onClick={() => handleProctorApproveEnrollment(req.request_id, 'approve')}
+                      className="px-2.5 py-1 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-[11px] shadow-2xs"
+                    >
+                      Approve
+                    </button>
+                    <button
+                      onClick={() => handleProctorApproveEnrollment(req.request_id, 'reject')}
+                      className="px-2.5 py-1 rounded-lg bg-white border border-rose-200 hover:bg-rose-50 text-rose-600 font-bold text-[11px]"
+                    >
+                      Reject
+                    </button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {/* Wards Grid Cards */}
+        {proctorWards.length === 0 ? (
+          <p className="text-xs text-slate-400 py-6 text-center bg-slate-50 rounded-2xl border border-dashed border-slate-200">
+            No student wards assigned to your proctoring group yet.
+          </p>
+        ) : (
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+            {proctorWards
+              .filter(w => {
+                const s = wardSearch.toLowerCase();
+                return `${w.first_name} ${w.last_name}`.toLowerCase().includes(s) ||
+                  w.student_id.toString().includes(s) ||
+                  (w.enrolled_course_names && w.enrolled_course_names.toLowerCase().includes(s));
+              })
+              .map((w) => {
+                const cgpaVal = parseFloat(w.cgpa || 8.5);
+                const isDistinction = cgpaVal >= 8.5;
+                const isWarning = cgpaVal < 7.0;
+
+                return (
+                  <div
+                    key={w.student_id}
+                    className="p-4 rounded-2xl border border-slate-200 bg-slate-50/60 hover:bg-white hover:border-blue-200 hover:shadow-md transition-all flex flex-col justify-between gap-3 text-xs"
+                  >
+                    <div>
+                      {/* Top Row: Ward Name & CGPA */}
+                      <div className="flex items-start justify-between gap-2 mb-2">
+                        <div className="flex items-center gap-2.5">
+                          <div className="w-8 h-8 rounded-xl bg-blue-100 text-blue-800 font-bold flex items-center justify-center shrink-0">
+                            {w.first_name[0]}{w.last_name[0]}
+                          </div>
+                          <div>
+                            <h4 className="font-extrabold text-slate-900 text-sm leading-tight">
+                              {w.first_name} {w.last_name}
+                            </h4>
+                            <span className="text-[10px] text-slate-500 font-semibold">
+                              Ward #{w.student_id} • {w.email}
+                            </span>
+                          </div>
+                        </div>
+
+                        <span className={`px-2 py-0.5 rounded-lg text-[10px] font-extrabold shrink-0 ${
+                          isDistinction ? 'bg-emerald-100 text-emerald-800 border border-emerald-200' :
+                          isWarning ? 'bg-rose-100 text-rose-800 border border-rose-200 animate-pulse' :
+                          'bg-blue-100 text-blue-800 border border-blue-200'
+                        }`}>
+                          CGPA {w.cgpa || '8.50'}
+                        </span>
+                      </div>
+
+                      {/* Phone & Tracker */}
+                      <div className="text-[11px] text-slate-600 space-y-1 pt-1 border-t border-slate-200/60">
+                        <div className="flex items-center justify-between">
+                          <span className="text-slate-400">Tracker Status:</span>
+                          <span className="font-bold text-slate-700">{w.daily_tracker || 'Active'}</span>
+                        </div>
+                        <div className="flex items-center justify-between">
+                          <span className="text-slate-400">Total Study Time:</span>
+                          <span className="font-bold text-indigo-700">{Math.round((w.time_spent || 0) / 60)} hrs logged</span>
+                        </div>
+                        <div className="flex items-center justify-between">
+                          <span className="text-slate-400">Assignments:</span>
+                          <span className="font-bold text-slate-700">{w.submission_count || 0} submitted (avg {w.avg_marks || 'N/A'})</span>
+                        </div>
+                        <div className="flex items-center justify-between">
+                          <span className="text-slate-400">Quizzes:</span>
+                          <span className="font-bold text-slate-700">{w.quiz_count || 0} attempted (avg {w.avg_quiz_score ? `${w.avg_quiz_score}%` : 'N/A'})</span>
+                        </div>
+                      </div>
+
+                      {/* Enrolled Courses Badges */}
+                      <div className="mt-2.5 pt-2 border-t border-slate-200/60">
+                        <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider block mb-1">
+                          Enrolled Subjects ({w.enrolled_count || 0}):
+                        </span>
+                        <div className="flex flex-wrap gap-1">
+                          {(w.enrolled_course_names ? w.enrolled_course_names.split(',') : ['DBMS', 'Operating Systems']).slice(0, 3).map((cn, i) => (
+                            <span key={i} className="px-2 py-0.5 bg-white border border-slate-200 rounded-md text-[10px] text-slate-700 font-semibold truncate max-w-[140px]">
+                              {cn.trim()}
+                            </span>
+                          ))}
+                          {(w.enrolled_count || 0) > 3 && (
+                            <span className="px-1.5 py-0.5 bg-slate-200 text-slate-600 rounded-md text-[9px] font-bold">
+                              +{(w.enrolled_count || 0) - 3} more
+                            </span>
+                          )}
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* Bottom Actions */}
+                    <div className="flex items-center gap-2 pt-2 border-t border-slate-200/60">
+                      <button
+                        onClick={() => setSelectedWard(w)}
+                        className="flex-1 py-1.5 px-2 rounded-xl bg-white hover:bg-blue-50 text-blue-700 border border-slate-200 font-bold text-[11px] transition-colors flex items-center justify-center gap-1 shadow-2xs"
+                      >
+                        <FileText className="w-3.5 h-3.5" /> Full Dossier
+                      </button>
+                      <button
+                        onClick={() => {
+                          setScheduleStudentId(w.student_id);
+                          setIsScheduleOpen(true);
+                        }}
+                        className="py-1.5 px-2.5 rounded-xl bg-blue-600 hover:bg-blue-700 text-white font-bold text-[11px] transition-colors flex items-center justify-center gap-1 shadow-2xs"
+                      >
+                        <Calendar className="w-3.5 h-3.5" /> Summon
+                      </button>
+                    </div>
+                  </div>
+                );
+              })}
+          </div>
+        )}
+      </div>
+
+      {/* Proctor Mentorship Meetings & Ward Requests Panel */}
+      <div className="bg-white rounded-3xl border border-slate-200 shadow-xs p-6">
+        <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4 mb-4">
+          <div className="flex items-center gap-2">
+            <div className="p-2.5 rounded-xl bg-blue-50 text-blue-600">
+              <Calendar className="w-5 h-5" />
+            </div>
+            <div>
+              <h3 className="font-extrabold text-base text-slate-900">
+                Mentorship Sessions & Ward Requests ({proctorMeetings.length})
+              </h3>
+              <p className="text-xs text-slate-500">
+                1-on-1 mentorship meetings requested by your assigned student wards or sessions scheduled by you.
+              </p>
+            </div>
+          </div>
+          <button
+            onClick={() => {
+              setIsScheduleOpen(true);
+              setScheduleStudentId(proctorWards[0]?.student_id || enrolledStudents[0]?.student_id || '101');
+              setScheduleTime('');
+              setScheduleNotes('');
+            }}
+            className="px-4 py-2 rounded-xl bg-blue-600 hover:bg-blue-700 text-white font-bold text-xs shadow-xs flex items-center gap-2 self-start sm:self-auto"
+          >
+            <Calendar className="w-4 h-4" /> Summon / Schedule Meet
+          </button>
+        </div>
+
+        {proctorMeetings.length === 0 ? (
+          <p className="text-xs text-slate-400 py-4 text-center bg-slate-50 rounded-2xl border border-dashed border-slate-200">
+            No active mentorship meetings or ward requests at this time.
+          </p>
+        ) : (
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            {proctorMeetings.map((m) => (
+              <div key={m.id} className="p-4 rounded-2xl border border-slate-200 bg-slate-50/70 flex flex-col justify-between gap-3 text-xs">
+                <div>
+                  <div className="flex items-center justify-between gap-2 mb-1.5">
+                    <span className="font-bold text-slate-900 text-sm">
+                      {m.student_name || `Ward #${m.student_id}`}
+                    </span>
+                    <span className={`px-2.5 py-0.5 rounded-full text-[10px] font-bold ${
+                      m.status === 'COMPLETED' ? 'bg-emerald-100 text-emerald-800 border border-emerald-200' :
+                      m.status === 'SCHEDULED' ? 'bg-blue-100 text-blue-800 border border-blue-200' :
+                      m.status === 'CONFIRMED' ? 'bg-indigo-100 text-indigo-800 border border-indigo-200' :
+                      m.status === 'CANCELLED' ? 'bg-rose-100 text-rose-800 border border-rose-200' :
+                      'bg-amber-100 text-amber-800 border border-amber-200'
+                    }`}>
+                      {m.status}
+                    </span>
+                  </div>
+                  <div className="font-semibold text-slate-800">📌 Topic: {m.topic}</div>
+                  <div className="text-[11px] text-slate-500 mt-1">
+                    ⏰ Slot: <strong>{m.scheduled_time || m.preferred_time}</strong> • 📍 Venue: <strong>{m.venue || instructor?.cabin_no || 'Cabin 401'}</strong>
+                  </div>
+                  {m.notes && (
+                    <p className="text-[11px] text-slate-600 mt-1 bg-white p-2 rounded-xl border border-slate-100 italic">
+                      "{m.notes}"
+                    </p>
+                  )}
+                  {m.advisory_notes && (
+                    <div className="mt-2 p-2.5 bg-emerald-50 border border-emerald-200 rounded-xl text-[11px] text-emerald-900">
+                      <strong>Advisory Outcome:</strong> {m.advisory_notes}
+                    </div>
+                  )}
+                </div>
+
+                {/* Actions */}
+                <div className="flex items-center gap-2 pt-2 border-t border-slate-200/60">
+                  {m.status === 'PENDING' && (
+                    <>
+                      <button
+                        onClick={() => {
+                          setAcceptingMeeting(m);
+                          setAcceptScheduledTime(m.preferred_time || 'Tomorrow at 3:00 PM');
+                          setAcceptVenue(m.venue || instructor?.cabin_no || 'Cabin 401');
+                        }}
+                        className="px-3 py-1.5 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs transition-colors flex items-center gap-1 shadow-2xs"
+                      >
+                        <CheckCircle2 className="w-3.5 h-3.5" /> Accept & Set Slot
+                      </button>
+                      <button
+                        onClick={() => handleDeclineWardMeet(m.id)}
+                        className="px-3 py-1.5 rounded-xl bg-white hover:bg-rose-50 text-rose-600 border border-rose-200 font-bold text-xs transition-colors"
+                      >
+                        Decline
+                      </button>
+                    </>
+                  )}
+
+                  {(m.status === 'SCHEDULED' || m.status === 'CONFIRMED') && (
+                    <button
+                      onClick={() => {
+                        setCompletingMeeting(m);
+                        setAdvisoryNotesInput('');
+                      }}
+                      className="px-3 py-1.5 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white font-bold text-xs transition-colors flex items-center gap-1 shadow-2xs"
+                    >
+                      <FileText className="w-3.5 h-3.5" /> Conclude & Log Advice
+                    </button>
+                  )}
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
 
       {/* Main Grid: My Course & Submissions Received */}
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
@@ -1369,6 +1858,410 @@ function InstructorDashboard({ data = {} }) {
           </div>
         </div>
       </div>
+
+      {/* Detailed Ward Dossier Modal */}
+      {selectedWard && (
+        <Modal
+          isOpen={!!selectedWard}
+          onClose={() => setSelectedWard(null)}
+          title={`Proctor Dossier: ${selectedWard.first_name} ${selectedWard.last_name} (#${selectedWard.student_id})`}
+          maxWidth="max-w-3xl"
+        >
+          <div className="space-y-5 text-xs">
+            {/* Header / Profile card */}
+            <div className="p-4 bg-gradient-to-r from-blue-50 to-indigo-50 border border-blue-200 rounded-2xl flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+              <div className="flex items-center gap-3">
+                <div className="w-12 h-12 rounded-2xl bg-blue-600 text-white font-extrabold text-base flex items-center justify-center shadow-md">
+                  {selectedWard.first_name[0]}{selectedWard.last_name[0]}
+                </div>
+                <div>
+                  <h4 className="font-extrabold text-slate-900 text-sm">
+                    {selectedWard.first_name} {selectedWard.last_name}
+                  </h4>
+                  <p className="text-slate-500 text-[11px] mt-0.5">
+                    Student ID: <strong>#{selectedWard.student_id}</strong> • DOB: {selectedWard.dob || '2004-05-15'}
+                  </p>
+                  <p className="text-slate-500 text-[11px]">
+                    ✉️ {selectedWard.email} • 📞 {selectedWard.phone_numbers || 'Not provided'}
+                  </p>
+                </div>
+              </div>
+              <div className="flex items-center gap-2">
+                <button
+                  onClick={() => {
+                    setScheduleStudentId(selectedWard.student_id);
+                    setIsScheduleOpen(true);
+                    setSelectedWard(null);
+                  }}
+                  className="px-3.5 py-2 rounded-xl bg-blue-600 hover:bg-blue-700 text-white font-bold text-xs shadow-xs flex items-center gap-1.5"
+                >
+                  <Calendar className="w-3.5 h-3.5" /> Summon for Meet
+                </button>
+              </div>
+            </div>
+
+            {/* Academic Health Metrics */}
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+              <div className="p-3 bg-slate-50 rounded-xl border border-slate-200">
+                <span className="text-[10px] uppercase font-bold text-slate-400">CGPA</span>
+                <div className="text-lg font-extrabold text-slate-900 mt-0.5 flex items-center gap-1.5">
+                  {selectedWard.cgpa || '8.50'}
+                  <span className={`text-[10px] px-1.5 py-0.5 rounded font-bold ${
+                    parseFloat(selectedWard.cgpa || 8.5) >= 8.5 ? 'bg-emerald-100 text-emerald-800' :
+                    parseFloat(selectedWard.cgpa || 8.5) >= 7.0 ? 'bg-blue-100 text-blue-800' :
+                    'bg-amber-100 text-amber-800'
+                  }`}>
+                    {parseFloat(selectedWard.cgpa || 8.5) >= 8.5 ? 'Distinction' : parseFloat(selectedWard.cgpa || 8.5) >= 7.0 ? 'Good' : 'Warning'}
+                  </span>
+                </div>
+              </div>
+
+              <div className="p-3 bg-slate-50 rounded-xl border border-slate-200">
+                <span className="text-[10px] uppercase font-bold text-slate-400">Daily Tracker</span>
+                <div className="text-lg font-extrabold text-emerald-600 mt-0.5">
+                  {selectedWard.daily_tracker || 'Active'}
+                </div>
+              </div>
+
+              <div className="p-3 bg-slate-50 rounded-xl border border-slate-200">
+                <span className="text-[10px] uppercase font-bold text-slate-400">Study Session Time</span>
+                <div className="text-lg font-extrabold text-indigo-600 mt-0.5">
+                  {Math.round((selectedWard.time_spent || 0) / 60)} hrs
+                </div>
+              </div>
+
+              <div className="p-3 bg-slate-50 rounded-xl border border-slate-200">
+                <span className="text-[10px] uppercase font-bold text-slate-400">Class Rank</span>
+                <div className="text-lg font-extrabold text-purple-600 mt-0.5">
+                  #{selectedWard.leaderboard_position || 1}
+                </div>
+              </div>
+            </div>
+
+            {/* Enrolled Courses */}
+            <div className="space-y-2">
+              <h5 className="font-extrabold text-slate-900 flex items-center gap-1.5">
+                <BookOpen className="w-4 h-4 text-blue-600" /> Enrolled Subjects ({selectedWard.enrolled_count || selectedWard.enrolledCoursesList?.length || 0})
+              </h5>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                {(selectedWard.enrolledCoursesList || []).map((c) => (
+                  <div key={c.course_id} className="p-2.5 bg-slate-50 border border-slate-200 rounded-xl flex items-center justify-between">
+                    <div>
+                      <span className="font-bold text-slate-800">{c.course_name}</span>
+                      <span className="text-[10px] text-slate-500 block">Code: #{c.course_id} • Dept: {c.dept_name || 'CS'}</span>
+                    </div>
+                    <Badge variant="blue" className="text-[10px]">Enrolled</Badge>
+                  </div>
+                ))}
+                {(!selectedWard.enrolledCoursesList || selectedWard.enrolledCoursesList.length === 0) && (
+                  <p className="text-slate-400 py-2 col-span-2 italic">Enrolled in: {selectedWard.enrolled_course_names || 'None'}</p>
+                )}
+              </div>
+            </div>
+
+            {/* Assignments Breakdown */}
+            <div className="space-y-2">
+              <h5 className="font-extrabold text-slate-900 flex items-center gap-1.5">
+                <Send className="w-4 h-4 text-amber-600" /> Recent Assignment Submissions ({selectedWard.submission_count || selectedWard.recentSubmissions?.length || 0})
+              </h5>
+              <div className="space-y-1.5 max-h-40 overflow-y-auto">
+                {(selectedWard.recentSubmissions || []).map((sub, i) => (
+                  <div key={i} className="p-2.5 bg-slate-50 border border-slate-200 rounded-xl space-y-1.5">
+                    <div className="flex items-center justify-between">
+                      <div>
+                        <span className="font-bold text-slate-800">{sub.assignment_name}</span>
+                        <span className="text-[10px] text-slate-500 block">{sub.course_name} • Date: {sub.submission_date}</span>
+                      </div>
+                      <div>
+                        {sub.marks_obtained !== null && sub.marks_obtained !== undefined ? (
+                          <span className="px-2 py-0.5 rounded-md bg-emerald-100 text-emerald-800 font-bold text-[10px]">
+                            {sub.marks_obtained} / {sub.max_marks || sub.marks || 20}
+                          </span>
+                        ) : (
+                          <span className="px-2 py-0.5 rounded-md bg-amber-100 text-amber-800 font-bold text-[10px]">
+                            Pending Grading
+                          </span>
+                        )}
+                      </div>
+                    </div>
+                    {sub.submission_content && (
+                      <SubmissionContentRenderer content={sub.submission_content} compact={true} />
+                    )}
+                  </div>
+                ))}
+                {(!selectedWard.recentSubmissions || selectedWard.recentSubmissions.length === 0) && (
+                  <p className="text-slate-400 py-2 italic">No assignment submissions logged yet.</p>
+                )}
+              </div>
+            </div>
+
+            {/* Quiz Performance */}
+            <div className="space-y-2">
+              <h5 className="font-extrabold text-slate-900 flex items-center gap-1.5">
+                <CheckCircle2 className="w-4 h-4 text-purple-600" /> Quiz Attempts & Scores ({selectedWard.quiz_count || selectedWard.quizAttempts?.length || 0})
+              </h5>
+              <div className="space-y-1.5 max-h-40 overflow-y-auto">
+                {(selectedWard.quizAttempts || []).map((qa, i) => (
+                  <div key={i} className="p-2 bg-slate-50 border border-slate-200 rounded-xl flex items-center justify-between">
+                    <div>
+                      <span className="font-bold text-slate-800">{qa.quiz_title}</span>
+                      <span className="text-[10px] text-slate-500 block">{qa.course_name}</span>
+                    </div>
+                    <span className="px-2 py-0.5 rounded-md bg-purple-100 text-purple-800 font-bold text-[10px]">
+                      Score: {qa.score}
+                    </span>
+                  </div>
+                ))}
+                {(!selectedWard.quizAttempts || selectedWard.quizAttempts.length === 0) && (
+                  <p className="text-slate-400 py-2 italic">No quiz attempts logged yet.</p>
+                )}
+              </div>
+            </div>
+
+            <div className="flex justify-end pt-2 border-t border-slate-100">
+              <button
+                type="button"
+                onClick={() => setSelectedWard(null)}
+                className="px-4 py-2 rounded-xl bg-slate-100 hover:bg-slate-200 font-bold text-slate-700"
+              >
+                Close Dossier
+              </button>
+            </div>
+          </div>
+        </Modal>
+      )}
+
+      {/* Faculty Schedule Mentorship Meet Modal */}
+      {isScheduleOpen && (
+        <Modal
+          isOpen={isScheduleOpen}
+          onClose={() => setIsScheduleOpen(false)}
+          title="Schedule Mentorship Session with Ward"
+        >
+          <form onSubmit={handleScheduleSubmit} className="space-y-4 text-xs">
+            <div className="p-3 bg-blue-50 border border-blue-200 rounded-xl text-slate-700">
+              Summon or schedule a 1-on-1 mentorship session with a student ward assigned to your proctoring group.
+            </div>
+
+            <div>
+              <label className="font-bold text-slate-700 block mb-1">Select Student Ward</label>
+              {(proctorWards.length > 0 ? proctorWards : enrolledStudents).length > 0 ? (
+                <select
+                  value={scheduleStudentId}
+                  onChange={(e) => setScheduleStudentId(e.target.value)}
+                  className="w-full px-3 py-2 rounded-xl border border-slate-200 focus:ring-2 focus:ring-blue-500/20 font-medium"
+                >
+                  {(proctorWards.length > 0 ? proctorWards : enrolledStudents).map((st) => (
+                    <option key={st.student_id} value={st.student_id}>
+                      {st.first_name} {st.last_name} (#{st.student_id}) {st.cgpa ? `— CGPA: ${st.cgpa}` : ''} {st.course_name ? `(${st.course_name})` : ''}
+                    </option>
+                  ))}
+                </select>
+              ) : (
+                <input
+                  type="number"
+                  value={scheduleStudentId}
+                  onChange={(e) => setScheduleStudentId(e.target.value)}
+                  placeholder="Enter Student ID (e.g. 101)"
+                  className="w-full px-3 py-2 rounded-xl border border-slate-200 focus:ring-2 focus:ring-blue-500/20"
+                  required
+                />
+              )}
+            </div>
+
+            <div>
+              <label className="font-bold text-slate-700 block mb-1">Session Agenda / Topic</label>
+              <select
+                value={scheduleTopic}
+                onChange={(e) => setScheduleTopic(e.target.value)}
+                className="w-full px-3 py-2 rounded-xl border border-slate-200 focus:ring-2 focus:ring-blue-500/20 font-medium"
+              >
+                <option value="Academic Performance & CGPA Advisory">Academic Performance & CGPA Advisory</option>
+                <option value="Backlog Clearance & Course Counseling">Backlog Clearance & Course Counseling</option>
+                <option value="Attendance Warning & Mentorship Checkup">Attendance Warning & Mentorship Checkup</option>
+                <option value="Semester Exam & Assignment Preparation">Semester Exam & Assignment Preparation</option>
+                <option value="Career, Projects & Internship Guidance">Career, Projects & Internship Guidance</option>
+                <option value="Routine Mentorship Review">Routine Mentorship Review</option>
+              </select>
+            </div>
+
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <div>
+                <label className="font-bold text-slate-700 block mb-1">Date & Time</label>
+                <input
+                  type="text"
+                  value={scheduleTime}
+                  onChange={(e) => setScheduleTime(e.target.value)}
+                  placeholder="e.g. Friday at 3:00 PM"
+                  className="w-full px-3 py-2 rounded-xl border border-slate-200 focus:ring-2 focus:ring-blue-500/20"
+                  required
+                />
+              </div>
+              <div>
+                <label className="font-bold text-slate-700 block mb-1">Venue / Location</label>
+                <input
+                  type="text"
+                  value={scheduleVenue}
+                  onChange={(e) => setScheduleVenue(e.target.value)}
+                  placeholder="e.g. Cabin 401"
+                  className="w-full px-3 py-2 rounded-xl border border-slate-200 focus:ring-2 focus:ring-blue-500/20"
+                />
+              </div>
+            </div>
+
+            <div>
+              <label className="font-bold text-slate-700 block mb-1">Advisory Notes / Instructions for Student</label>
+              <textarea
+                rows="3"
+                value={scheduleNotes}
+                onChange={(e) => setScheduleNotes(e.target.value)}
+                placeholder="Bring mid-term mark sheets and assignment notes..."
+                className="w-full px-3 py-2 rounded-xl border border-slate-200 focus:ring-2 focus:ring-blue-500/20"
+              />
+            </div>
+
+            <div className="flex justify-end gap-2 pt-2">
+              <button
+                type="button"
+                onClick={() => setIsScheduleOpen(false)}
+                className="px-4 py-2 rounded-xl border border-slate-200 font-bold text-slate-600 hover:bg-slate-50"
+              >
+                Cancel
+              </button>
+              <button
+                type="submit"
+                disabled={scheduleLoading}
+                className="px-4 py-2 rounded-xl bg-blue-600 hover:bg-blue-700 text-white font-bold disabled:opacity-50"
+              >
+                {scheduleLoading ? 'Scheduling...' : 'Schedule & Notify Student'}
+              </button>
+            </div>
+          </form>
+        </Modal>
+      )}
+
+      {/* Accept Ward Meet Modal */}
+      {acceptingMeeting && (
+        <Modal
+          isOpen={!!acceptingMeeting}
+          onClose={() => setAcceptingMeeting(null)}
+          title={`Confirm Mentorship Slot: ${acceptingMeeting.student_name || 'Ward'}`}
+        >
+          <form onSubmit={handleAcceptConfirmSubmit} className="space-y-4 text-xs">
+            <div className="p-3 bg-emerald-50 border border-emerald-200 rounded-xl text-emerald-900">
+              Confirm or adjust the meeting schedule and cabin venue for <strong>{acceptingMeeting.student_name}</strong>.
+            </div>
+
+            <div>
+              <label className="font-bold text-slate-700 block mb-1">Topic</label>
+              <div className="p-2.5 bg-slate-50 border border-slate-200 rounded-xl text-slate-800 font-semibold">
+                {acceptingMeeting.topic}
+              </div>
+            </div>
+
+            {acceptingMeeting.notes && (
+              <div>
+                <label className="font-bold text-slate-700 block mb-1">Ward's Note / Request</label>
+                <div className="p-2.5 bg-slate-50 border border-slate-200 rounded-xl text-slate-700 italic">
+                  "{acceptingMeeting.notes}"
+                </div>
+              </div>
+            )}
+
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <div>
+                <label className="font-bold text-slate-700 block mb-1">Confirmed Date & Time</label>
+                <input
+                  type="text"
+                  value={acceptScheduledTime}
+                  onChange={(e) => setAcceptScheduledTime(e.target.value)}
+                  placeholder="e.g. Tomorrow at 3:30 PM"
+                  className="w-full px-3 py-2 rounded-xl border border-slate-200 focus:ring-2 focus:ring-emerald-500/20"
+                  required
+                />
+              </div>
+
+              <div>
+                <label className="font-bold text-slate-700 block mb-1">Meeting Venue / Cabin</label>
+                <input
+                  type="text"
+                  value={acceptVenue}
+                  onChange={(e) => setAcceptVenue(e.target.value)}
+                  placeholder="e.g. Cabin 401"
+                  className="w-full px-3 py-2 rounded-xl border border-slate-200 focus:ring-2 focus:ring-emerald-500/20"
+                  required
+                />
+              </div>
+            </div>
+
+            <div className="flex justify-end gap-2 pt-2">
+              <button
+                type="button"
+                onClick={() => setAcceptingMeeting(null)}
+                className="px-4 py-2 rounded-xl border border-slate-200 font-bold text-slate-600 hover:bg-slate-50"
+              >
+                Cancel
+              </button>
+              <button
+                type="submit"
+                disabled={acceptLoading}
+                className="px-4 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white font-bold disabled:opacity-50"
+              >
+                {acceptLoading ? 'Confirming...' : 'Confirm Meeting Slot'}
+              </button>
+            </div>
+          </form>
+        </Modal>
+      )}
+      {completingMeeting && (
+        <Modal
+          isOpen={!!completingMeeting}
+          onClose={() => setCompletingMeeting(null)}
+          title={`Conclude Session: ${completingMeeting.student_name || 'Ward'}`}
+        >
+          <form onSubmit={handleCompleteMeetSubmit} className="space-y-4 text-xs">
+            <div className="p-3 bg-emerald-50 border border-emerald-200 rounded-xl text-emerald-900">
+              Record final advisory remarks and conclude this mentorship meeting. These notes will be saved and visible to the student in their mentorship record.
+            </div>
+
+            <div>
+              <label className="font-bold text-slate-700 block mb-1">Topic</label>
+              <div className="p-2.5 bg-slate-50 border border-slate-200 rounded-xl text-slate-800 font-semibold">
+                {completingMeeting.topic}
+              </div>
+            </div>
+
+            <div>
+              <label className="font-bold text-slate-700 block mb-1">Mentorship Advice & Action Items</label>
+              <textarea
+                rows="4"
+                value={advisoryNotesInput}
+                onChange={(e) => setAdvisoryNotesInput(e.target.value)}
+                placeholder="Advised student to attend DBMS remedial classes, complete pending assignments by next Monday, and focus on normalization topics..."
+                className="w-full px-3 py-2 rounded-xl border border-slate-200 focus:ring-2 focus:ring-emerald-500/20"
+                required
+              />
+            </div>
+
+            <div className="flex justify-end gap-2 pt-2">
+              <button
+                type="button"
+                onClick={() => setCompletingMeeting(null)}
+                className="px-4 py-2 rounded-xl border border-slate-200 font-bold text-slate-600 hover:bg-slate-50"
+              >
+                Cancel
+              </button>
+              <button
+                type="submit"
+                disabled={completingLoading}
+                className="px-4 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white font-bold disabled:opacity-50"
+              >
+                {completingLoading ? 'Saving...' : 'Conclude Meeting'}
+              </button>
+            </div>
+          </form>
+        </Modal>
+      )}
     </div>
   );
 }
@@ -1383,6 +2276,58 @@ function StudentDashboard({ data = {}, currentUser, onRefresh }) {
   const [trackerStatus, setTrackerStatus] = useState(analytics?.daily_tracker || 'Good');
   const [logging, setLogging] = useState(false);
   const [logNotice, setLogNotice] = useState(null);
+
+  // Proctor Mentorship Meetings State (Option 1 via instructor_notification)
+  const [meetings, setMeetings] = useState([]);
+  const [isMeetModalOpen, setIsMeetModalOpen] = useState(false);
+  const [meetTopic, setMeetTopic] = useState('Academic Backlog & CGPA Review');
+  const [meetTime, setMeetTime] = useState('');
+  const [meetNotes, setMeetNotes] = useState('');
+  const [meetSubmitting, setMeetSubmitting] = useState(false);
+  const [meetNotice, setMeetNotice] = useState(null);
+
+  const loadMeetings = () => {
+    if (!currentUser?.id) return;
+    lmsApi.getProctorMeetings('student', currentUser.id)
+      .then(res => setMeetings(res.meetings || []))
+      .catch(() => {});
+  };
+
+  useEffect(() => {
+    loadMeetings();
+  }, [currentUser?.id]);
+
+  const handleRequestMeet = async (e) => {
+    e.preventDefault();
+    setMeetSubmitting(true);
+    try {
+      const res = await lmsApi.requestProctorMeeting({
+        student_id: currentUser.id,
+        topic: meetTopic,
+        preferred_time: meetTime || 'Next available slot',
+        notes: meetNotes
+      });
+      setMeetNotice({ type: 'success', text: res.message });
+      setIsMeetModalOpen(false);
+      setMeetNotes('');
+      setMeetTime('');
+      loadMeetings();
+      setTimeout(() => setMeetNotice(null), 5000);
+    } catch (err) {
+      setMeetNotice({ type: 'error', text: err.message });
+    } finally {
+      setMeetSubmitting(false);
+    }
+  };
+
+  const handleAcknowledgeMeet = async (meetingId) => {
+    try {
+      await lmsApi.updateProctorMeeting(meetingId, { action: 'acknowledge' });
+      loadMeetings();
+    } catch (err) {
+      alert(err.message);
+    }
+  };
 
   const handleQuickLog = async (minutes) => {
     setLogging(true);
@@ -1621,27 +2566,90 @@ function StudentDashboard({ data = {}, currentUser, onRefresh }) {
 
           {/* Student Proctor Card */}
           {student && (
-            <div className="mt-6 p-5 bg-gradient-to-r from-slate-50 to-blue-50/50 rounded-2xl border border-slate-200 flex items-center justify-between">
-              <div className="flex items-center gap-4">
-                <div className="w-12 h-12 rounded-2xl bg-white border border-blue-200 flex items-center justify-center text-blue-600 shadow-xs">
-                  <UserCheck className="w-6 h-6" />
+            <div className="mt-6 p-5 bg-gradient-to-r from-slate-50 to-blue-50/50 rounded-2xl border border-slate-200">
+              <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
+                <div className="flex items-center gap-4">
+                  <div className="w-12 h-12 rounded-2xl bg-white border border-blue-200 flex items-center justify-center text-blue-600 shadow-xs">
+                    <UserCheck className="w-6 h-6" />
+                  </div>
+                  <div>
+                    <div className="text-[11px] uppercase font-bold text-blue-700 tracking-wider">Assigned Faculty Proctor</div>
+                    <h4 className="text-sm font-bold text-slate-900">
+                      Prof. {student.proctor_first || 'Raj'} {student.proctor_last || 'Menon'}
+                    </h4>
+                    <p className="text-xs text-slate-500">
+                      Cabin: {student.proctor_cabin || 'Cabin 401'} • Mentorship Ward #{student.proctor_id || 1}
+                    </p>
+                  </div>
                 </div>
-                <div>
-                  <div className="text-[11px] uppercase font-bold text-blue-700 tracking-wider">Assigned Faculty Proctor</div>
-                  <h4 className="text-sm font-bold text-slate-900">
-                    Prof. {student.proctor_first || 'Anu'} {student.proctor_last || 'Nair'}
-                  </h4>
-                  <p className="text-xs text-slate-500">
-                    Cabin: {student.proctor_cabin || 'C101'} • Mentorship Ward #{student.proctor_id || 1}
-                  </p>
+                <div className="flex items-center gap-2">
+                  <button
+                    onClick={() => setIsMeetModalOpen(true)}
+                    className="px-3.5 py-2 rounded-xl text-xs font-bold bg-blue-600 hover:bg-blue-700 text-white shadow-xs transition-colors flex items-center gap-1.5"
+                  >
+                    <Calendar className="w-3.5 h-3.5" /> Request Meet
+                  </button>
+                  <Link
+                    to="/proctors"
+                    className="px-3 py-2 rounded-xl text-xs font-bold bg-white text-slate-700 border border-slate-200 hover:bg-slate-50 shadow-xs"
+                  >
+                    Proctor Info
+                  </Link>
                 </div>
               </div>
-              <Link
-                to="/proctors"
-                className="px-3 py-1.5 rounded-xl text-xs font-bold bg-white text-blue-700 border border-blue-200 hover:bg-blue-50 shadow-xs"
-              >
-                Proctor Info
-              </Link>
+
+              {/* Notice Banner */}
+              {meetNotice && (
+                <div className={`mt-3 p-3 rounded-xl text-xs font-semibold ${meetNotice.type === 'success' ? 'bg-emerald-50 text-emerald-800 border border-emerald-200' : 'bg-rose-50 text-rose-800 border border-rose-200'}`}>
+                  {meetNotice.text}
+                </div>
+              )}
+
+              {/* Active Mentorship Meetings List */}
+              {meetings.length > 0 && (
+                <div className="mt-4 pt-4 border-t border-blue-100/60 space-y-2">
+                  <div className="text-[11px] font-bold uppercase tracking-wider text-slate-500">Mentorship Sessions ({meetings.length})</div>
+                  {meetings.slice(0, 3).map((m) => (
+                    <div key={m.id} className="p-3 bg-white rounded-xl border border-slate-200 shadow-xs flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 text-xs">
+                      <div>
+                        <div className="flex items-center gap-2">
+                          <span className="font-bold text-slate-900">{m.topic}</span>
+                          <span className={`px-2 py-0.5 rounded-full text-[10px] font-bold ${
+                            m.status === 'COMPLETED' ? 'bg-emerald-100 text-emerald-800 border border-emerald-200' :
+                            m.status === 'SCHEDULED' ? 'bg-blue-100 text-blue-800 border border-blue-200' :
+                            m.status === 'CONFIRMED' ? 'bg-indigo-100 text-indigo-800 border border-indigo-200' :
+                            m.status === 'CANCELLED' ? 'bg-rose-100 text-rose-800 border border-rose-200' :
+                            'bg-amber-100 text-amber-800 border border-amber-200'
+                          }`}>
+                            {m.status}
+                          </span>
+                        </div>
+                        <div className="text-[11px] text-slate-500 mt-0.5">
+                          ⏰ {m.scheduled_time || m.preferred_time} • 📍 {m.venue || 'Cabin 401'}
+                        </div>
+                        {m.advisory_notes && (
+                          <div className="mt-1.5 p-2 bg-emerald-50/60 border border-emerald-100 rounded-lg text-[11px] text-emerald-900">
+                            <strong>Mentor Advisory:</strong> {m.advisory_notes}
+                          </div>
+                        )}
+                      </div>
+                      {m.status === 'SCHEDULED' && (
+                        <button
+                          onClick={() => handleAcknowledgeMeet(m.id)}
+                          className="px-2.5 py-1 rounded-lg bg-indigo-600 hover:bg-indigo-700 text-white font-bold text-[11px] shadow-2xs flex items-center gap-1 shrink-0"
+                        >
+                          <CheckCircle2 className="w-3.5 h-3.5" /> Confirm Attendance
+                        </button>
+                      )}
+                      {m.status === 'CONFIRMED' && (
+                        <span className="px-2 py-0.5 rounded-lg bg-indigo-50 border border-indigo-200 text-indigo-700 font-bold text-[10px] shrink-0 flex items-center gap-1">
+                          <CheckCircle2 className="w-3 h-3 text-indigo-600" /> Attendance Confirmed
+                        </span>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              )}
             </div>
           )}
         </div>
@@ -1711,6 +2719,72 @@ function StudentDashboard({ data = {}, currentUser, onRefresh }) {
           </div>
         </div>
       </div>
+
+      {/* Student Request Proctor Meet Modal */}
+      {isMeetModalOpen && (
+        <Modal
+          isOpen={isMeetModalOpen}
+          onClose={() => setIsMeetModalOpen(false)}
+          title={`Request Mentorship Meeting with Prof. ${student.proctor_first || 'Raj'} ${student.proctor_last || 'Menon'}`}
+        >
+          <form onSubmit={handleRequestMeet} className="space-y-4 text-xs">
+            <div className="p-3 bg-blue-50 border border-blue-200 rounded-xl text-slate-700">
+              Submit a 1-on-1 mentorship meeting request to your assigned proctor <strong>Prof. {student.proctor_first || 'Raj'} {student.proctor_last || 'Menon'}</strong> ({student.proctor_cabin || 'Cabin 401'}).
+            </div>
+            <div>
+              <label className="font-bold text-slate-700 block mb-1">Topic / Concern</label>
+              <select
+                value={meetTopic}
+                onChange={(e) => setMeetTopic(e.target.value)}
+                className="w-full px-3 py-2 rounded-xl border border-slate-200 focus:ring-2 focus:ring-blue-500/20 font-medium"
+              >
+                <option value="Academic Backlog & CGPA Review">Academic Backlog & CGPA Review</option>
+                <option value="Course Registration & Subject Selection">Course Registration & Subject Selection</option>
+                <option value="Assignment & Quiz Performance Advice">Assignment & Quiz Performance Advice</option>
+                <option value="Internship, Project & Career Guidance">Internship, Project & Career Guidance</option>
+                <option value="Attendance & Leave Advisory">Attendance & Leave Advisory</option>
+                <option value="General Academic Mentorship">General Academic Mentorship</option>
+              </select>
+            </div>
+            <div>
+              <label className="font-bold text-slate-700 block mb-1">Preferred Time / Day</label>
+              <input
+                type="text"
+                value={meetTime}
+                onChange={(e) => setMeetTime(e.target.value)}
+                placeholder="e.g. Tomorrow at 3:00 PM, or Friday afternoon"
+                className="w-full px-3 py-2 rounded-xl border border-slate-200 focus:ring-2 focus:ring-blue-500/20"
+              />
+            </div>
+            <div>
+              <label className="font-bold text-slate-700 block mb-1">Notes / Questions for Proctor</label>
+              <textarea
+                rows="3"
+                value={meetNotes}
+                onChange={(e) => setMeetNotes(e.target.value)}
+                placeholder="Briefly describe what you would like guidance on (e.g. struggling with DBMS queries, need advice on improving grade point)..."
+                className="w-full px-3 py-2 rounded-xl border border-slate-200 focus:ring-2 focus:ring-blue-500/20"
+              />
+            </div>
+            <div className="flex justify-end gap-2 pt-2">
+              <button
+                type="button"
+                onClick={() => setIsMeetModalOpen(false)}
+                className="px-4 py-2 rounded-xl border border-slate-200 font-bold text-slate-600 hover:bg-slate-50"
+              >
+                Cancel
+              </button>
+              <button
+                type="submit"
+                disabled={meetSubmitting}
+                className="px-4 py-2 rounded-xl bg-blue-600 hover:bg-blue-700 text-white font-bold disabled:opacity-50"
+              >
+                {meetSubmitting ? 'Sending Request...' : 'Send Request to Proctor'}
+              </button>
+            </div>
+          </form>
+        </Modal>
+      )}
     </div>
   );
 }
@@ -1778,7 +2852,7 @@ export default function Dashboard() {
   }
 
   if (currentUser?.role === 'instructor') {
-    return <InstructorDashboard data={data} />;
+    return <InstructorDashboard data={data} onRefresh={fetchDashboard} />;
   }
 
   return <StudentDashboard data={data} currentUser={currentUser} onRefresh={fetchDashboard} />;

@@ -1,6 +1,8 @@
 import React from 'react';
 import { BrowserRouter as Router, Routes, Route, Navigate, useLocation } from 'react-router-dom';
 import { AuthProvider } from './context/AuthContext';
+import { NotificationProvider } from './context/NotificationContext';
+import NotificationToast from './components/common/NotificationToast';
 import Navbar from './components/layout/Navbar';
 import Sidebar from './components/layout/Sidebar';
 import ProtectedRoute from './components/common/ProtectedRoute';
@@ -12,6 +14,7 @@ import Login from './pages/Login';
 import Dashboard from './pages/Dashboard';
 import Courses from './pages/Courses';
 import CourseDetail from './pages/CourseDetail';
+import CurriculumGraph from './pages/CurriculumGraph';
 import Assignments from './pages/Assignments';
 import Quizzes from './pages/Quizzes';
 import Modules from './pages/Modules';
@@ -63,8 +66,9 @@ function AppLayout() {
             <Route path="/analytics" element={<Analytics />} />
             <Route path="/profile" element={<Profile />} />
             
-            {/* Admin-Only Route for Database CRUD Studio */}
+            {/* Admin-Only Routes for Database Studios */}
             <Route path="/crud" element={<AdminRoute><CrudStudio /></AdminRoute>} />
+            <Route path="/curriculum-graph" element={<AdminRoute><CurriculumGraph /></AdminRoute>} />
 
             <Route path="/login" element={<Navigate to="/" replace />} />
             <Route path="*" element={<Navigate to="/" replace />} />
@@ -83,6 +87,9 @@ function AppLayout() {
           </div>
         </div>
       </footer>
+
+      {/* Real-Time Push Notification Toast Alert */}
+      <NotificationToast />
     </div>
   );
 }
@@ -91,9 +98,11 @@ export default function App() {
   return (
     <ErrorBoundary>
       <AuthProvider>
-        <Router>
-          <AppLayout />
-        </Router>
+        <NotificationProvider>
+          <Router>
+            <AppLayout />
+          </Router>
+        </NotificationProvider>
       </AuthProvider>
     </ErrorBoundary>
   );

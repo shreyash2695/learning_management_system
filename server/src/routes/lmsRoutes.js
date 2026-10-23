@@ -35,11 +35,19 @@ import {
   getEnrollmentRequests,
   approveEnrollmentRequest,
   getInstructorNotifications,
-  markNotificationRead
+  markNotificationRead,
+  getUserNotifications,
+  markAllUserNotificationsRead,
+  uploadSubmissionFile,
+  requestProctorMeeting,
+  scheduleProctorMeeting,
+  getProctorMeetings,
+  updateProctorMeeting
 } from '../controllers/lmsController.js';
 
-
 const router = express.Router();
+
+router.post('/upload', uploadSubmissionFile);
 
 router.get('/dashboard', getDashboardData);
 router.get('/courses', getCourses);
@@ -84,5 +92,13 @@ router.post('/enroll/approve',          approveEnrollmentRequest);
 // Phase 12: Instructor Notifications
 router.get('/notifications',            getInstructorNotifications);
 router.put('/notifications/:id/read',   markNotificationRead);
+router.get('/user/notifications',       getUserNotifications);
+router.put('/user/notifications/read-all', markAllUserNotificationsRead);
+
+// Proctor Mentorship Meetings (Bidirectional flow via instructor_notification)
+router.post('/proctor/meetings/request',   requestProctorMeeting);
+router.post('/proctor/meetings/schedule',  scheduleProctorMeeting);
+router.get('/proctor/meetings',            getProctorMeetings);
+router.put('/proctor/meetings/:id',        updateProctorMeeting);
 
 export default router;

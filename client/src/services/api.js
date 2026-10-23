@@ -99,6 +99,13 @@ export const lmsApi = {
       body: JSON.stringify(payload)
     }).then(handleResponse),
 
+  uploadFile: (filename, fileData) =>
+    fetch(`${BASE_URL}/lms/upload`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...getAuthHeaders() },
+      body: JSON.stringify({ filename, fileData })
+    }).then(handleResponse),
+
   gradeSubmission: (payload) => 
     fetch(`${BASE_URL}/lms/submissions/grade`, {
       method: 'POST',
@@ -295,6 +302,78 @@ export const lmsApi = {
       headers: { 'Content-Type': 'application/json', ...getAuthHeaders() },
       body: JSON.stringify({})
     }).then(handleResponse),
+
+  getUserNotifications: () =>
+    fetch(`${BASE_URL}/lms/user/notifications`, {
+      headers: { ...getAuthHeaders() }
+    }).then(handleResponse),
+
+  markAllNotificationsRead: () =>
+    fetch(`${BASE_URL}/lms/user/notifications/read-all`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json', ...getAuthHeaders() },
+      body: JSON.stringify({})
+    }).then(handleResponse),
+
+  // Proctor Mentorship Meetings API (Bidirectional flow)
+  requestProctorMeeting: (payload) =>
+    fetch(`${BASE_URL}/lms/proctor/meetings/request`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...getAuthHeaders() },
+      body: JSON.stringify(payload)
+    }).then(handleResponse),
+
+  scheduleProctorMeeting: (payload) =>
+    fetch(`${BASE_URL}/lms/proctor/meetings/schedule`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...getAuthHeaders() },
+      body: JSON.stringify(payload)
+    }).then(handleResponse),
+
+  getProctorMeetings: (role = 'student', userId = 0) =>
+    fetch(`${BASE_URL}/lms/proctor/meetings?role=${encodeURIComponent(role)}&userId=${encodeURIComponent(userId)}`, {
+      headers: { ...getAuthHeaders() }
+    }).then(handleResponse),
+
+  updateProctorMeeting: (meetingId, payload) =>
+    fetch(`${BASE_URL}/lms/proctor/meetings/${meetingId}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json', ...getAuthHeaders() },
+      body: JSON.stringify(payload)
+    }).then(handleResponse),
+};
+
+export const notificationApi = {
+  getNotifications: (userId, role) =>
+    fetch(`${BASE_URL}/notifications?userId=${encodeURIComponent(userId)}&role=${encodeURIComponent(role)}`, {
+      headers: { ...getAuthHeaders() }
+    }).then(handleResponse),
+
+  markAsRead: (notificationId) =>
+    fetch(`${BASE_URL}/notifications/${notificationId}/read`, {
+      method: 'PUT',
+      headers: { ...getAuthHeaders() }
+    }).then(handleResponse),
+
+  markAllAsRead: (userId, role) =>
+    fetch(`${BASE_URL}/notifications/read-all`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json', ...getAuthHeaders() },
+      body: JSON.stringify({ userId, role })
+    }).then(handleResponse),
+
+  getStreamUrl: (userId, role) =>
+    `${BASE_URL}/notifications/stream?userId=${encodeURIComponent(userId)}&role=${encodeURIComponent(role)}`
+};
+
+export const graphApi = {
+  getCurriculum: () => fetch(`${BASE_URL}/graph/curriculum`, { headers: { ...getAuthHeaders() } }).then(handleResponse),
+  getCycles: () => fetch(`${BASE_URL}/graph/cycles`, { headers: { ...getAuthHeaders() } }).then(handleResponse),
+  getStudentProgress: (studentId) => fetch(`${BASE_URL}/graph/students/${studentId}/progress`, { headers: { ...getAuthHeaders() } }).then(handleResponse),
+  runCypher: (query) => fetch(`${BASE_URL}/graph/cypher`, { method: 'POST', headers: { 'Content-Type': 'application/json', ...getAuthHeaders() }, body: JSON.stringify({ query }) }).then(handleResponse),
+  getPrerequisites: (courseId) => fetch(`${BASE_URL}/graph/courses/${courseId}/prerequisites`, { headers: { ...getAuthHeaders() } }).then(handleResponse),
+  getLearningPath: (start, target) => fetch(`${BASE_URL}/graph/paths?start=${encodeURIComponent(start)}&target=${encodeURIComponent(target)}`, { headers: { ...getAuthHeaders() } }).then(handleResponse),
+  checkEligibility: (studentId, courseId) => fetch(`${BASE_URL}/graph/students/${studentId}/eligibility/${courseId}`, { headers: { ...getAuthHeaders() } }).then(handleResponse)
 };
 
 
@@ -336,38 +415,6 @@ export const crudApi = {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', ...getAuthHeaders() },
       body: JSON.stringify({ query })
-    }).then(handleResponse),
-
-  // Phase 12: Enrollment Approval Workflow
-  requestEnrollment: (studentId, courseId) =>
-    fetch(`${BASE_URL}/lms/enroll/request`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', ...getAuthHeaders() },
-      body: JSON.stringify({ student_id: studentId, course_id: courseId })
-    }).then(handleResponse),
-
-  getEnrollmentRequests: () =>
-    fetch(`${BASE_URL}/lms/enroll/requests`, {
-      headers: { ...getAuthHeaders() }
-    }).then(handleResponse),
-
-  approveEnrollmentRequest: (requestId, action, notes = '') =>
-    fetch(`${BASE_URL}/lms/enroll/approve`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', ...getAuthHeaders() },
-      body: JSON.stringify({ request_id: requestId, action, notes })
-    }).then(handleResponse),
-
-  getInstructorNotifications: (instructorId) =>
-    fetch(`${BASE_URL}/lms/notifications?instructorId=${instructorId}`, {
-      headers: { ...getAuthHeaders() }
-    }).then(handleResponse),
-
-  markNotificationRead: (notificationId) =>
-    fetch(`${BASE_URL}/lms/notifications/${notificationId}/read`, {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/json', ...getAuthHeaders() },
-      body: JSON.stringify({})
-    }).then(handleResponse),
+    }).then(handleResponse)
 };
 

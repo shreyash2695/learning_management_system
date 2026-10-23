@@ -8,7 +8,6 @@ import {
   BookOpen, 
   AlertCircle, 
   ArrowRight,
-  Sparkles,
   CheckCircle2,
   UserPlus,
   Phone,
@@ -30,8 +29,8 @@ export default function Login() {
 
   // Sign In State
   const [activeRole, setActiveRole] = useState('student'); // 'student', 'instructor', 'admin'
-  const [username, setUsername] = useState('akhil_user');
-  const [password, setPassword] = useState('pass1');
+  const [username, setUsername] = useState('');
+  const [password, setPassword] = useState('');
 
   // Registration State
   const [regRole, setRegRole] = useState('student'); // 'student' or 'instructor'
@@ -96,16 +95,8 @@ export default function Login() {
     setActiveRole(role);
     setError(null);
     setSuccessMsg(null);
-    if (role === 'student') {
-      setUsername('akhil_user');
-      setPassword('pass1');
-    } else if (role === 'instructor') {
-      setUsername('raj@gmail.com');
-      setPassword('prof123');
-    } else if (role === 'admin') {
-      setUsername('admin');
-      setPassword('admin123');
-    }
+    setUsername('');
+    setPassword('');
   };
 
   const handleSignInSubmit = async (e) => {
@@ -115,21 +106,6 @@ export default function Login() {
     setLoading(true);
     try {
       await login(activeRole, username, password);
-      navigate('/', { replace: true });
-    } catch (err) {
-      setError(err.message);
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  // 1-Click Quick Demo Login Handler
-  const handleQuickDemo = async (role, u, p) => {
-    setError(null);
-    setSuccessMsg(null);
-    setLoading(true);
-    try {
-      await login(role, u, p);
       navigate('/', { replace: true });
     } catch (err) {
       setError(err.message);
@@ -359,7 +335,7 @@ export default function Login() {
                       type={activeRole === 'instructor' ? 'email' : 'text'}
                       value={username}
                       onChange={(e) => setUsername(e.target.value)}
-                      placeholder={activeRole === 'instructor' ? 'raj@gmail.com' : activeRole === 'admin' ? 'admin' : 'akhil_user'}
+                      placeholder={activeRole === 'instructor' ? 'faculty@university.edu' : activeRole === 'admin' ? 'admin' : 'student_username'}
                       required
                       className="w-full pl-10 pr-4 py-2.5 rounded-xl border border-slate-200 text-xs sm:text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500"
                     />
@@ -406,52 +382,6 @@ export default function Login() {
                 >
                   Don't have an account? <span className="underline">Register as Student or Faculty</span>
                 </button>
-              </div>
-
-              {/* 1-Click Quick Demo Sign-In */}
-              <div className="mt-8 pt-6 border-t border-slate-100">
-                <div className="text-[11px] font-bold text-slate-400 uppercase tracking-wider text-center mb-3 flex items-center justify-center gap-1.5">
-                  <Sparkles className="w-3.5 h-3.5 text-blue-600" />
-                  1-Click Demo Logins (Instant Testing)
-                </div>
-
-                <div className="grid grid-cols-2 gap-2 text-xs">
-                  <button
-                    type="button"
-                    onClick={() => handleQuickDemo('student', 'akhil_user', 'pass1')}
-                    className="p-2 rounded-xl bg-blue-50 hover:bg-blue-100 text-blue-700 font-bold border border-blue-200 text-left transition-colors"
-                  >
-                    🎓 Akhil (Student)
-                    <span className="block text-[10px] font-normal text-blue-600">akhil_user / pass1</span>
-                  </button>
-
-                  <button
-                    type="button"
-                    onClick={() => handleQuickDemo('student', 'neha_user', 'pass2')}
-                    className="p-2 rounded-xl bg-emerald-50 hover:bg-emerald-100 text-emerald-700 font-bold border border-emerald-200 text-left transition-colors"
-                  >
-                    🎓 Neha (Student)
-                    <span className="block text-[10px] font-normal text-emerald-600">neha_user / pass2</span>
-                  </button>
-
-                  <button
-                    type="button"
-                    onClick={() => handleQuickDemo('instructor', 'raj@gmail.com', 'prof123')}
-                    className="p-2 rounded-xl bg-amber-50 hover:bg-amber-100 text-amber-800 font-bold border border-amber-200 text-left transition-colors"
-                  >
-                    👨‍🏫 Prof. Raj (Faculty)
-                    <span className="block text-[10px] font-normal text-amber-700">raj@gmail.com / prof123</span>
-                  </button>
-
-                  <button
-                    type="button"
-                    onClick={() => handleQuickDemo('admin', 'admin', 'admin123')}
-                    className="p-2 rounded-xl bg-purple-50 hover:bg-purple-100 text-purple-800 font-bold border border-purple-200 text-left transition-colors"
-                  >
-                    🛡️ Admin (CRUD Access)
-                    <span className="block text-[10px] font-normal text-purple-700">admin / admin123</span>
-                  </button>
-                </div>
               </div>
             </>
           )}

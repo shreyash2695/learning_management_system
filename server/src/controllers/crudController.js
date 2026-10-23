@@ -1,4 +1,12 @@
 import { dbAll, dbGet, dbRun, dbRawQuery, getDatabaseType } from '../config/db.js';
+import { 
+  syncStudentToNeo4j, 
+  deleteStudentFromNeo4j,
+  syncInstructorToNeo4j,
+  deleteInstructorFromNeo4j,
+  syncEnrollmentToNeo4j, 
+  removeEnrollmentFromNeo4j 
+} from '../config/neo4j.js';
 
 // Table schema metadata to assist UI forms & validation
 export const TABLE_SCHEMAS = {
@@ -63,7 +71,8 @@ export const TABLE_SCHEMAS = {
       { name: 'last_name', type: 'text', label: 'Last Name', required: true },
       { name: 'email', type: 'email', label: 'Email Address', required: true },
       { name: 'cabin_no', type: 'text', label: 'Cabin Number', required: false },
-      { name: 'dept_id', type: 'number', label: 'Department ID', required: false, refTable: 'department', refCol: 'dept_id' }
+      { name: 'dept_id', type: 'number', label: 'Department ID', required: false, refTable: 'department', refCol: 'dept_id' },
+      { name: 'password', type: 'text', label: 'Password (default: prof123)', required: false }
     ]
   },
   instructor_phone: {
@@ -228,11 +237,39 @@ export const TABLE_SCHEMAS = {
       { name: 'changed_at', type: 'text', label: 'Timestamp of Mutation', required: false },
       { name: 'description', type: 'text', label: 'Audit Description', required: false }
     ]
+  },
+  // Phase 12: Enrollment Approval Workflow Table
+  enrollment_request: {
+    primaryKey: ['request_id'],
+    columns: [
+      { name: 'request_id', type: 'number', label: 'Request ID (Auto)', required: false },
+      { name: 'student_id', type: 'number', label: 'Student ID', required: true, refTable: 'student', refCol: 'student_id' },
+      { name: 'course_id', type: 'number', label: 'Course ID', required: true, refTable: 'course', refCol: 'course_id' },
+      { name: 'status', type: 'text', label: 'Status (PENDING, ADMIN_APPROVED, APPROVED, REJECTED)', required: true },
+      { name: 'admin_approved', type: 'number', label: 'Admin Approved (0 or 1)', required: false },
+      { name: 'proctor_approved', type: 'number', label: 'Proctor Approved (0 or 1)', required: false },
+      { name: 'admin_notes', type: 'text', label: 'Admin / Proctor Notes', required: false },
+      { name: 'requested_at', type: 'text', label: 'Requested Timestamp', required: false },
+      { name: 'updated_at', type: 'text', label: 'Updated Timestamp', required: false }
+    ]
+  },
+  // Phase 12: Instructor & Mentorship Notification Table
+  instructor_notification: {
+    primaryKey: ['notification_id'],
+    columns: [
+      { name: 'notification_id', type: 'number', label: 'Notification ID (Auto)', required: false },
+      { name: 'instructor_id', type: 'number', label: 'Instructor ID', required: true, refTable: 'instructor', refCol: 'instructor_id' },
+      { name: 'message', type: 'text', label: 'Message / Notification Payload', required: true },
+      { name: 'course_id', type: 'number', label: 'Course ID', required: false, refTable: 'course', refCol: 'course_id' },
+      { name: 'student_id', type: 'number', label: 'Student ID', required: false, refTable: 'student', refCol: 'student_id' },
+      { name: 'is_read', type: 'number', label: 'Is Read (0 or 1)', required: false },
+      { name: 'created_at', type: 'text', label: 'Created Timestamp', required: false }
+    ]
   }
 };
 
 // Constraint Validator (mirrors MySQL dump triggers and CHECK constraints)
-function validateRow(table, row) {
+export function validateRow(table, row) {
   // 1. Student Age check (Trigger: check_student_age, age >= 16)
   if (table === 'student' && row.dob) {
     const birthDate = new Date(row.dob);
@@ -315,6 +352,27 @@ function validateRow(table, row) {
       throw new Error('Constraint Violation (progress_analytics_chk_2): Time spent cannot be negative.');
     }
   }
+
+  // 11. Enrollment Request status & flags
+  if (table === 'enrollment_request') {
+    const validStatuses = ['PENDING', 'ADMIN_APPROVED', 'APPROVED', 'REJECTED'];
+    if (row.status && !validStatuses.includes(row.status.toUpperCase())) {
+      throw new Error(`Constraint Violation: Invalid status '${row.status}'. Allowed: ${validStatuses.join(', ')}`);
+    }
+    if (row.admin_approved !== undefined && ![0, 1].includes(Number(row.admin_approved))) {
+      throw new Error('Constraint Violation: admin_approved must be 0 or 1.');
+    }
+    if (row.proctor_approved !== undefined && ![0, 1].includes(Number(row.proctor_approved))) {
+      throw new Error('Constraint Violation: proctor_approved must be 0 or 1.');
+    }
+  }
+
+  // 12. Notification is_read check (0 or 1)
+  if (table === 'instructor_notification' && row.is_read !== undefined) {
+    if (![0, 1].includes(Number(row.is_read))) {
+      throw new Error('Constraint Violation: is_read must be 0 or 1.');
+    }
+  }
 }
 
 // 1. Get Schema Meta Information
@@ -363,8 +421,15 @@ export async function insertRecord(req, res) {
   if (!schema) return res.status(404).json({ success: false, error: `Table '${table}' not found in schema.` });
 
   try {
-    const rowData = req.body;
+    const rowData = { ...req.body };
     validateRow(table, rowData);
+
+    // If table is instructor and password is not provided or empty, default to 'prof123'
+    if (table === 'instructor') {
+      if (!rowData.password || !String(rowData.password).trim()) {
+        rowData.password = 'prof123';
+      }
+    }
 
     const cols = [];
     const placeholders = [];
@@ -385,7 +450,85 @@ export async function insertRecord(req, res) {
     const sql = `INSERT INTO ${table} (${cols.join(', ')}) VALUES (${placeholders.join(', ')})`;
     const result = await dbRun(sql, values);
 
-    res.json({ success: true, message: `Record successfully inserted into '${table}'!`, result });
+    let message = `Record successfully inserted into '${table}'!`;
+
+    // Automatic Account Provisioning for Student
+    if (table === 'student') {
+      const studentId = parseInt(rowData.student_id || result.lastInsertRowid, 10);
+      const firstNameClean = (rowData.first_name || 'student').toLowerCase().replace(/[^a-z0-9_]/g, '');
+      let baseUsername = `${firstNameClean}_user`;
+      let username = baseUsername;
+
+      const existingUser = await dbGet('SELECT account_id FROM account WHERE username = ?', [username]);
+      if (existingUser) {
+        username = `${baseUsername}_${studentId}`;
+      }
+
+      const defaultPassword = (rowData.account_password || rowData.password || 'pass1').trim();
+
+      // Check if account already exists for this student
+      const existingAcc = await dbGet('SELECT account_id FROM account WHERE student_id = ?', [studentId]);
+      if (!existingAcc) {
+        await dbRun(
+          'INSERT INTO account (student_id, account_id, username, password) VALUES (?, 1, ?, ?)',
+          [studentId, username, defaultPassword]
+        );
+      }
+
+      // Automatically initialize student progress analytics
+      await dbRun(
+        `INSERT OR IGNORE INTO progress_analytics (student_id, progress_id, cgpa, daily_tracker, time_spent, leaderboard_position)
+         VALUES (?, 1, 0.0, 'Newly Added Student', 0, NULL)`,
+        [studentId]
+      );
+
+      message = `Student #${studentId} created successfully! Login credentials auto-generated: Username "${username}", Password "${defaultPassword}".`;
+    }
+
+    // Automatic Provisioning Notice for Instructor
+    if (table === 'instructor') {
+      const instructorId = parseInt(rowData.instructor_id || result.lastInsertRowid, 10);
+      const email = rowData.email;
+      const firstName = (rowData.first_name || '').toLowerCase();
+      const pwd = rowData.password || 'prof123';
+
+      message = `Instructor #${instructorId} created successfully! Login credentials: Email "${email}" (or Username "${firstName}_prof"), Password "${pwd}".`;
+    }
+
+    // Synchronize to Neo4j Graph Cloud
+    try {
+      if (table === 'student') {
+        const sName = [rowData.first_name, rowData.middle_name, rowData.last_name].filter(Boolean).join(' ');
+        await syncStudentToNeo4j({
+          student_id: rowData.student_id,
+          name: sName,
+          email: rowData.email
+        });
+      } else if (table === 'instructor') {
+        const iName = [rowData.first_name, rowData.middle_name, rowData.last_name].filter(Boolean).join(' ');
+        let dName = 'General';
+        if (rowData.dept_id) {
+          const dRow = await dbGet('SELECT dept_name FROM department WHERE dept_id = ?', [rowData.dept_id]);
+          if (dRow) dName = dRow.dept_name;
+        }
+        await syncInstructorToNeo4j({
+          instructor_id: rowData.instructor_id,
+          name: iName,
+          email: rowData.email,
+          cabin_no: rowData.cabin_no,
+          dept: dName
+        });
+      } else if (table === 'enrolls') {
+        await syncEnrollmentToNeo4j({
+          student_id: rowData.student_id,
+          course_id: rowData.course_id
+        });
+      }
+    } catch (graphErr) {
+      console.error('[Neo4j] CRUD sync error on insert:', graphErr.message);
+    }
+
+    res.json({ success: true, message, result });
   } catch (err) {
     console.error('Insert error:', err);
     res.status(400).json({ success: false, error: err.message });
@@ -429,6 +572,23 @@ export async function updateRecord(req, res) {
     const sql = `UPDATE ${table} SET ${setClauses.join(', ')} WHERE ${whereClauses.join(' AND ')}`;
     const result = await dbRun(sql, values);
 
+    // Synchronize updates to Neo4j Graph Cloud
+    try {
+      if (table === 'student' && key.student_id) {
+        const sRow = await dbGet('SELECT * FROM student WHERE student_id = ?', [key.student_id]);
+        if (sRow) {
+          const sName = [sRow.first_name, sRow.middle_name, sRow.last_name].filter(Boolean).join(' ');
+          await syncStudentToNeo4j({
+            student_id: sRow.student_id,
+            name: sName,
+            email: sRow.email
+          });
+        }
+      }
+    } catch (graphErr) {
+      console.error('[Neo4j] CRUD sync error on update:', graphErr.message);
+    }
+
     res.json({ success: true, message: `Record in '${table}' updated successfully!`, result });
   } catch (err) {
     console.error('Update error:', err);
@@ -460,6 +620,22 @@ export async function deleteRecord(req, res) {
 
     const sql = `DELETE FROM ${table} WHERE ${whereClauses.join(' AND ')}`;
     const result = await dbRun(sql, values);
+
+    // Synchronize deletion to Neo4j Graph Cloud
+    try {
+      if (table === 'student' && key.student_id) {
+        await deleteStudentFromNeo4j(key.student_id);
+      } else if (table === 'instructor' && key.instructor_id) {
+        await deleteInstructorFromNeo4j(key.instructor_id);
+      } else if (table === 'enrolls' && key.student_id && key.course_id) {
+        await removeEnrollmentFromNeo4j({
+          student_id: key.student_id,
+          course_id: key.course_id
+        });
+      }
+    } catch (graphErr) {
+      console.error('[Neo4j] CRUD sync error on delete:', graphErr.message);
+    }
 
     res.json({ success: true, message: `Record from '${table}' deleted successfully!`, result });
   } catch (err) {

@@ -106,11 +106,31 @@ async function runTests() {
     assert(res.getStatus() === 403, 'Student cannot approve → 403');
   }
 
-  // Test 6: Proctor gate → auto-enrollment + notification
-  console.log('\nTest 6: Proctor gate approved → auto-enrolled + notification');
+  // Test 5b: Admin CANNOT approve proctor gate (strict independence)
+  console.log('\nTest 5b: Admin CANNOT approve proctor gate (independent separation)');
   {
     const reqRow = await dbGet('SELECT request_id FROM enrollment_request WHERE student_id = ? AND course_id = ?', [TEST_STUDENT_ID, TEST_COURSE_ID]);
     const req = mockReq({ request_id: reqRow.request_id, action: 'proctor_approve' }, {}, 'admin', 1);
+    const res = mockRes();
+    await approveEnrollmentRequest(req, res);
+    assert(res.getStatus() === 403, 'Admin cannot approve proctor gate → 403');
+  }
+
+  // Test 5c: Instructor CANNOT approve admin gate (strict independence)
+  console.log('\nTest 5c: Instructor CANNOT approve admin gate (independent separation)');
+  {
+    const reqRow = await dbGet('SELECT request_id FROM enrollment_request WHERE student_id = ? AND course_id = ?', [TEST_STUDENT_ID, TEST_COURSE_ID]);
+    const req = mockReq({ request_id: reqRow.request_id, action: 'admin_approve' }, {}, 'instructor', 205);
+    const res = mockRes();
+    await approveEnrollmentRequest(req, res);
+    assert(res.getStatus() === 403, 'Instructor cannot approve admin gate → 403');
+  }
+
+  // Test 6: Proctor gate → auto-enrollment + notification
+  console.log('\nTest 6: Proctor gate approved by assigned proctor → auto-enrolled + notification');
+  {
+    const reqRow = await dbGet('SELECT request_id FROM enrollment_request WHERE student_id = ? AND course_id = ?', [TEST_STUDENT_ID, TEST_COURSE_ID]);
+    const req = mockReq({ request_id: reqRow.request_id, action: 'proctor_approve' }, {}, 'instructor', 205);
     const res = mockRes();
     await approveEnrollmentRequest(req, res);
     assert(res.getData()?.success === true, 'Proctor approve success');

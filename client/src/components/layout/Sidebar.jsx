@@ -12,6 +12,7 @@ import {
   FolderCheck,
   Send,
   Database,
+  Network,
   Lock,
   User
 } from 'lucide-react';
@@ -36,8 +37,6 @@ export default function Sidebar() {
 
   const navItems = NAV_ITEMS
     .filter(item => {
-      // Instructors do not have proctors
-      if (isInstructor && item.path === '/proctors') return false;
       // System Administrator does not take or teach courses, submit assignments, take quizzes, or grade submissions
       if (isAdmin && ['/courses', '/modules', '/assignments', '/quizzes', '/submissions'].includes(item.path)) return false;
       return true;
@@ -70,7 +69,7 @@ export default function Sidebar() {
       if (item.path === '/proctors') {
         return {
           ...item,
-          label: isStudent ? 'My Assigned Proctor' : 'Proctors & Ward Allocations'
+          label: isStudent ? 'My Assigned Proctor' : isInstructor ? 'My Proctor Wards & Advisory' : 'Proctors & Ward Allocations'
         };
       }
       if (item.path === '/analytics') {
@@ -148,11 +147,38 @@ export default function Sidebar() {
             )}
             <div>
               <div className="leading-tight flex items-center gap-1.5">
-                <span>CRUD Studio</span>
+                <span>SQL CRUD Studio</span>
                 {!isAdmin && <span className="text-[10px] text-amber-700 font-semibold">(Restricted)</span>}
               </div>
               <div className="text-[10px] font-normal opacity-80">
                 {isAdmin ? 'Full SQL Console & Tables' : 'Administrator Privileges Required'}
+              </div>
+            </div>
+          </NavLink>
+
+          <NavLink
+            to="/curriculum-graph"
+            className={({ isActive }) =>
+              `flex items-center gap-3 px-3.5 py-3 rounded-xl text-xs sm:text-sm font-bold transition-all duration-200 border mt-2 ${
+                isActive
+                  ? 'bg-indigo-600 text-white border-indigo-600 shadow-md shadow-indigo-500/20'
+                  : 'bg-indigo-50/70 hover:bg-indigo-100/80 text-indigo-800 border-indigo-200/80 hover:border-indigo-300'
+              }`
+            }
+          >
+            {isAdmin ? (
+              <Network className="w-4 h-4 shrink-0 text-indigo-600" />
+            ) : (
+              <Lock className="w-4 h-4 shrink-0 text-amber-600" />
+            )}
+            <div>
+              <div className="leading-tight flex items-center gap-1.5">
+                <span>Knowledge Graph</span>
+                <span className="text-[10px] font-extrabold px-1.5 py-0.2 rounded bg-indigo-200/60 text-indigo-900">Neo4j</span>
+                {!isAdmin && <span className="text-[10px] text-amber-700 font-semibold">(Restricted)</span>}
+              </div>
+              <div className="text-[10px] font-normal opacity-80">
+                {isAdmin ? 'Interactive Graph & Cypher' : 'Administrator Privileges Required'}
               </div>
             </div>
           </NavLink>

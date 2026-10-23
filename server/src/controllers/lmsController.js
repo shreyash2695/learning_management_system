@@ -1,5 +1,63 @@
+import path from 'path';
+import fs from 'fs';
+import { fileURLToPath } from 'url';
 import { dbAll, dbGet, dbRun, dbTransaction } from '../config/db.js';
 import { hashPassword, verifyPassword } from './authController.js';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
+// Relational Faculty-to-Proctor Identity Resolver (Eliminates Modulo Math Hack)
+export async function getOrSyncProctorForInstructor(instructor) {
+  if (!instructor) return null;
+
+  // 1. Relational match by exact faculty first & last name
+  let proctor = await dbGet(
+    'SELECT * FROM proctor WHERE LOWER(TRIM(first_name)) = LOWER(TRIM(?)) AND LOWER(TRIM(last_name)) = LOWER(TRIM(?))',
+    [instructor.first_name, instructor.last_name]
+  );
+
+  // 2. Relational match by assigned cabin number
+  if (!proctor && instructor.cabin_no) {
+    proctor = await dbGet(
+      'SELECT * FROM proctor WHERE UPPER(TRIM(cabin_no)) = UPPER(TRIM(?))',
+      [instructor.cabin_no]
+    );
+  }
+
+  // 3. Direct ID alignment fallback for baseline university faculty (201 -> 1, 202 -> 2, etc.)
+  if (!proctor && instructor.instructor_id) {
+    const candidateId = parseInt(instructor.instructor_id, 10) - 200;
+    if (candidateId > 0 && candidateId <= 5) {
+      proctor = await dbGet('SELECT * FROM proctor WHERE proctor_id = ?', [candidateId]);
+    }
+  }
+
+  // 4. If newly registered faculty has no proctor row, create a dedicated proctor record
+  if (!proctor && instructor.instructor_id) {
+    const maxRow = await dbGet('SELECT MAX(proctor_id) as max_id FROM proctor');
+    const newProctorId = Math.max(6, (parseInt(maxRow?.max_id, 10) || 5) + 1);
+    try {
+      await dbRun(
+        'INSERT INTO proctor (proctor_id, first_name, middle_name, last_name, cabin_no) VALUES (?, ?, ?, ?, ?)',
+        [newProctorId, instructor.first_name, instructor.middle_name || null, instructor.last_name, instructor.cabin_no || 'Cabin 401']
+      );
+
+      const phoneRow = await dbGet('SELECT phone_no FROM instructor_phone WHERE instructor_id = ? LIMIT 1', [instructor.instructor_id]);
+      if (phoneRow?.phone_no) {
+        try {
+          await dbRun('INSERT INTO proctor_phone (proctor_id, phone_no) VALUES (?, ?)', [newProctorId, phoneRow.phone_no]);
+        } catch {}
+      }
+
+      proctor = await dbGet('SELECT * FROM proctor WHERE proctor_id = ?', [newProctorId]);
+    } catch {
+      proctor = await dbGet('SELECT * FROM proctor ORDER BY proctor_id ASC LIMIT 1');
+    }
+  }
+
+  return proctor;
+}
 
 // 1. Role-Aware Dashboard Overview Data
 export async function getDashboardData(req, res) {
@@ -201,6 +259,88 @@ export async function getDashboardData(req, res) {
         ? (feedbacks.reduce((acc, f) => acc + (f.rating || 5), 0) / feedbacks.length).toFixed(2)
         : '5.00';
 
+      // ==========================================
+      // MENTORSHIP & PROCTEE PORTFOLIO FOR INSTRUCTOR
+      // ==========================================
+      const proctorRow = await getOrSyncProctorForInstructor(instructor);
+      const proctorId = proctorRow ? proctorRow.proctor_id : 1;
+      const proctorProfile = proctorRow || {
+        proctor_id: proctorId,
+        first_name: instructor.first_name,
+        last_name: instructor.last_name,
+        cabin_no: instructor.cabin_no
+      };
+
+      const proctorWards = await dbAll(`
+        SELECT s.student_id, s.first_name, s.last_name, s.email, s.dob,
+          (SELECT GROUP_CONCAT(DISTINCT sp.phone_no) FROM student_phone sp WHERE sp.student_id = s.student_id) as phone_numbers,
+          pa.cgpa, pa.daily_tracker, pa.leaderboard_position,
+          COALESCE((SELECT SUM(ss.time_spent) FROM study_session ss WHERE ss.student_id = s.student_id), pa.time_spent, 0) as time_spent,
+          (SELECT COUNT(*) FROM enrolls e WHERE e.student_id = s.student_id) as enrolled_count,
+          (SELECT GROUP_CONCAT(DISTINCT c.course_name) FROM enrolls e JOIN course c ON e.course_id = c.course_id WHERE e.student_id = s.student_id) as enrolled_course_names,
+          (SELECT COUNT(*) FROM submits sub WHERE sub.student_id = s.student_id) as submission_count,
+          (SELECT ROUND(AVG(sub.marks_obtained), 1) FROM submits sub WHERE sub.student_id = s.student_id AND sub.marks_obtained IS NOT NULL) as avg_marks,
+          (SELECT COUNT(*) FROM quiz_attempt qa WHERE qa.student_id = s.student_id) as quiz_count,
+          (SELECT ROUND(AVG(qa.score), 1) FROM quiz_attempt qa WHERE qa.student_id = s.student_id) as avg_quiz_score
+        FROM student s
+        LEFT JOIN progress_analytics pa ON s.student_id = pa.student_id
+        WHERE s.proctor_id = ?
+        ORDER BY s.student_id ASC
+      `, [proctorId]);
+
+      // Detailed recent submissions, quiz attempts, and enrolled courses breakdown for each ward
+      for (const ward of proctorWards) {
+        ward.recentSubmissions = await dbAll(`
+          SELECT sub.*, a.name as assignment_name, a.marks as max_marks, c.course_name
+          FROM submits sub
+          JOIN assignment a ON sub.course_id = a.course_id AND sub.assignment_id = a.assignment_id
+          JOIN course c ON a.course_id = c.course_id
+          WHERE sub.student_id = ?
+          ORDER BY sub.submission_date DESC
+          LIMIT 5
+        `, [ward.student_id]);
+
+        ward.quizAttempts = await dbAll(`
+          SELECT qa.*, q.title as quiz_title, c.course_name
+          FROM quiz_attempt qa
+          JOIN quiz q ON qa.course_id = q.course_id AND qa.quiz_id = q.quiz_id
+          JOIN course c ON q.course_id = c.course_id
+          WHERE qa.student_id = ?
+          ORDER BY qa.attempt_id DESC
+          LIMIT 5
+        `, [ward.student_id]);
+
+        ward.enrolledCoursesList = await dbAll(`
+          SELECT c.course_id, c.course_name, d.dept_name
+          FROM enrolls e
+          JOIN course c ON e.course_id = c.course_id
+          LEFT JOIN department d ON c.dept_id = d.dept_id
+          WHERE e.student_id = ?
+          ORDER BY c.course_id ASC
+        `, [ward.student_id]);
+
+        ward.meetingHistory = await dbAll(`
+          SELECT * FROM instructor_notification
+          WHERE student_id = ? AND instructor_id = ? AND message LIKE '[PROCTOR_MEET]%'
+          ORDER BY notification_id DESC
+        `, [ward.student_id, instructor.instructor_id]);
+      }
+
+      // Pending enrollment requests specifically for this proctor's assigned wards
+      const proctorPendingRequests = await dbAll(`
+        SELECT er.*,
+          s.first_name || ' ' || s.last_name as student_name,
+          s.email as student_email,
+          c.course_name,
+          pa.cgpa
+        FROM enrollment_request er
+        JOIN student s ON er.student_id = s.student_id
+        JOIN course c ON er.course_id = c.course_id
+        LEFT JOIN progress_analytics pa ON s.student_id = pa.student_id
+        WHERE s.proctor_id = ? AND er.proctor_approved = 0 AND er.status != 'REJECTED'
+        ORDER BY er.requested_at DESC
+      `, [proctorId]);
+
       return res.json({
         success: true,
         role: 'instructor',
@@ -209,12 +349,20 @@ export async function getDashboardData(req, res) {
         enrolledStudents,
         submissionsToReview,
         feedbacks,
+        proctorPortfolio: {
+          proctorId,
+          proctorProfile,
+          proctorWards,
+          proctorPendingRequests
+        },
         metrics: {
           totalCoursesTaught: teachingCourses.length,
           totalEnrolledStudents: enrolledStudents.length,
           totalSubmissionsReceived: submissionsToReview.length,
           totalFeedbackReceived: feedbacks.length,
-          averageFeedbackRating: avgRating
+          averageFeedbackRating: avgRating,
+          totalProctorWards: proctorWards.length,
+          pendingProctorApprovals: proctorPendingRequests.length
         }
       });
     }
@@ -546,6 +694,13 @@ export async function submitAssignment(req, res) {
       });
     }
 
+    // IDOR protection: ensure logged-in student is submitting for themselves
+    const callerId = req.user?.id || (req.headers?.['x-user-id'] ? parseInt(req.headers['x-user-id'], 10) : null);
+    const callerRole = (req.user?.role || req.headers?.['x-user-role'] || '').toLowerCase();
+    if (callerId && callerRole === 'student' && parseInt(student_id, 10) !== callerId) {
+      return res.status(403).json({ success: false, error: 'Access Denied: You cannot submit assignments on behalf of another student.' });
+    }
+
     // Verify student exists
     const student = await dbGet('SELECT student_id, first_name, last_name FROM student WHERE student_id = ?', [student_id]);
     if (!student) {
@@ -564,11 +719,10 @@ export async function submitAssignment(req, res) {
     // Ensure student is registered/enrolled in this course
     const enrolled = await dbGet('SELECT 1 FROM enrolls WHERE student_id = ? AND course_id = ?', [student_id, course_id]);
     if (!enrolled) {
-      try {
-        await dbRun('INSERT INTO enrolls (student_id, course_id) VALUES (?, ?)', [student_id, course_id]);
-      } catch (enrErr) {
-        console.warn(`[LMS] Auto-enrollment notice for Student #${student_id} in Course #${course_id}:`, enrErr.message);
-      }
+      return res.status(403).json({
+        success: false,
+        error: `Access Denied: Student #${student_id} is not enrolled in Course #${course_id}. Please enroll before submitting coursework.`
+      });
     }
 
     const sDate = req.body?.submission_date || new Date().toISOString().split('T')[0];
@@ -725,8 +879,9 @@ export async function getQuizQuestions(req, res) {
   try {
     const quizId = parseInt(req.params.id, 10);
     const courseId = parseInt(req.query.courseId || '301', 10);
-    const role = (req.query.role || req.user?.role || req.headers['x-user-role'] || '').toLowerCase();
-    const showAnswers = req.query.showAnswers === 'true' || role === 'instructor' || role === 'admin';
+    const role = (req.user?.role || req.headers?.['x-user-role'] || req.query?.role || '').toLowerCase();
+    const isStaff = role === 'instructor' || role === 'admin';
+    const showAnswers = isStaff && (req.query.showAnswers === 'true' || isStaff);
 
     const quiz = await dbGet('SELECT * FROM quiz WHERE course_id = ? AND quiz_id = ?', [courseId, quizId]);
     if (!quiz) return res.status(404).json({ success: false, error: 'Quiz not found.' });
@@ -903,8 +1058,17 @@ export async function getProctors(req, res) {
     `);
 
     for (const pr of proctors) {
+      pr.instructor_id = 200 + pr.proctor_id;
       pr.students = await dbAll(`
-        SELECT student_id, first_name, last_name, email FROM student WHERE proctor_id = ?
+        SELECT s.student_id, s.first_name, s.last_name, s.email,
+          pa.cgpa, pa.daily_tracker,
+          COALESCE((SELECT SUM(ss.time_spent) FROM study_session ss WHERE ss.student_id = s.student_id), pa.time_spent, 0) as time_spent,
+          (SELECT GROUP_CONCAT(DISTINCT c.course_name) FROM enrolls e JOIN course c ON e.course_id = c.course_id WHERE e.student_id = s.student_id) as enrolled_courses,
+          (SELECT COUNT(*) FROM submits sub WHERE sub.student_id = s.student_id) as submission_count
+        FROM student s
+        LEFT JOIN progress_analytics pa ON s.student_id = pa.student_id
+        WHERE s.proctor_id = ?
+        ORDER BY s.student_id ASC
       `, [pr.proctor_id]);
     }
 
@@ -1083,6 +1247,16 @@ export async function enrollCourse(req, res) {
 export async function dropCourse(req, res) {
   try {
     const { student_id, course_id } = req.body;
+    if (!student_id || !course_id) {
+      return res.status(400).json({ success: false, error: 'student_id and course_id are required.' });
+    }
+
+    const callerId = req.user?.id || (req.headers?.['x-user-id'] ? parseInt(req.headers['x-user-id'], 10) : null);
+    const callerRole = (req.user?.role || req.headers?.['x-user-role'] || '').toLowerCase();
+    if (callerId && callerRole === 'student' && parseInt(student_id, 10) !== callerId) {
+      return res.status(403).json({ success: false, error: 'Access Denied: You cannot drop courses for another student.' });
+    }
+
     await dbRun('DELETE FROM enrolls WHERE student_id = ? AND course_id = ?', [student_id, course_id]);
     res.json({ success: true, message: 'Course dropped successfully.' });
   } catch (err) {
@@ -1178,22 +1352,56 @@ export async function submitCourseFeedback(req, res) {
       return res.status(400).json({ success: false, error: 'Constraint Violation: Rating must be between 1 and 5.' });
     }
 
+    // Enrollment Enforcement: Student must be officially enrolled to rate/review course
+    const sId = parseInt(student_id, 10);
+    const cId = parseInt(course_id, 10);
+    const enrolled = await dbGet('SELECT 1 FROM enrolls WHERE student_id = ? AND course_id = ?', [sId, cId]);
+    if (!enrolled) {
+      return res.status(403).json({
+        success: false,
+        error: `Access Denied: Student #${sId} is not enrolled in Course #${cId}. Only enrolled students can submit course feedback.`
+      });
+    }
+
     // Determine instructor if not directly supplied
     let instId = instructor_id ? parseInt(instructor_id, 10) : null;
     if (!instId) {
-      const assigned = await dbGet('SELECT instructor_id FROM teaches WHERE course_id = ? LIMIT 1', [course_id]);
+      const assigned = await dbGet('SELECT instructor_id FROM teaches WHERE course_id = ? LIMIT 1', [cId]);
       instId = assigned ? assigned.instructor_id : null;
     }
 
-    const maxFeedback = (await dbGet('SELECT MAX(feedback_no) as max_no FROM course_feedback WHERE student_id = ?', [student_id]))?.max_no || 0;
-    const feedbackNo = maxFeedback + 1;
     const textComments = comments ? comments.trim() : 'Comprehensive course instruction and clear explanation.';
-
     const nowStr = new Date().toISOString().slice(0, 19).replace('T', ' ');
+
+    // Deduplication & Upsert: prevent unlimited duplicate feedback spam from a single student
+    const existing = await dbGet('SELECT feedback_no FROM course_feedback WHERE student_id = ? AND course_id = ? ORDER BY feedback_no DESC LIMIT 1', [sId, cId]);
+    if (existing) {
+      // Clean up legacy duplicate rows if any exist from older seed runs
+      await dbRun(
+        'DELETE FROM course_feedback WHERE student_id = ? AND course_id = ? AND feedback_no != ?',
+        [sId, cId, existing.feedback_no]
+      );
+
+      await dbRun(`
+        UPDATE course_feedback 
+        SET rating = ?, comments = ?, instructor_id = COALESCE(?, instructor_id), feedback_date = ?
+        WHERE student_id = ? AND course_id = ? AND feedback_no = ?
+      `, [numRating, textComments, instId, nowStr, sId, cId, existing.feedback_no]);
+
+      return res.json({
+        success: true,
+        updated: true,
+        message: 'Course feedback submitted successfully into course_feedback table! (Updated existing review)'
+      });
+    }
+
+    const maxFeedback = (await dbGet('SELECT MAX(feedback_no) as max_no FROM course_feedback WHERE student_id = ?', [sId]))?.max_no || 0;
+    const feedbackNo = maxFeedback + 1;
+
     await dbRun(`
       INSERT INTO course_feedback (student_id, feedback_no, course_id, instructor_id, rating, comments, feedback_date)
       VALUES (?, ?, ?, ?, ?, ?, ?)
-    `, [student_id, feedbackNo, course_id, instId, numRating, textComments, nowStr]);
+    `, [sId, feedbackNo, cId, instId, numRating, textComments, nowStr]);
 
     res.json({ success: true, message: 'Course feedback submitted successfully into course_feedback table!' });
   } catch (err) {
@@ -1274,6 +1482,12 @@ export async function updateStudentPhone(req, res) {
       return res.status(400).json({ success: false, error: 'Student ID and phone number are required.' });
     }
 
+    const callerId = req.user?.id || (req.headers?.['x-user-id'] ? parseInt(req.headers['x-user-id'], 10) : null);
+    const callerRole = (req.user?.role || req.headers?.['x-user-role'] || '').toLowerCase();
+    if (callerId && callerRole === 'student' && parseInt(student_id, 10) !== callerId) {
+      return res.status(403).json({ success: false, error: 'Access Denied: You cannot update phone records for another student.' });
+    }
+
     const trimmedPhone = phone_no.trim();
     const phoneRegex = /^[0-9]{10}$/;
     if (!phoneRegex.test(trimmedPhone)) {
@@ -1295,6 +1509,12 @@ export async function updateStudentPassword(req, res) {
     const { student_id, old_password, new_password } = req.body;
     if (!student_id || !old_password || !new_password) {
       return res.status(400).json({ success: false, error: 'All fields are required.' });
+    }
+
+    const callerId = req.user?.id || (req.headers?.['x-user-id'] ? parseInt(req.headers['x-user-id'], 10) : null);
+    const callerRole = (req.user?.role || req.headers?.['x-user-role'] || '').toLowerCase();
+    if (callerId && callerRole === 'student' && parseInt(student_id, 10) !== callerId) {
+      return res.status(403).json({ success: false, error: 'Access Denied: You cannot update password for another student.' });
     }
 
     const account = await dbGet('SELECT * FROM account WHERE student_id = ?', [student_id]);
@@ -1720,18 +1940,29 @@ export async function requestEnrollment(req, res) {
   }
 }
 
-// 27. Get All Enrollment Requests — Admin only
+// 27. Get All Enrollment Requests — Admin and Instructors (Proctors)
 export async function getEnrollmentRequests(req, res) {
   try {
     const role = (req.query?.role || req.user?.role || req.headers?.['x-user-role'] || '').toLowerCase();
-    const requestingUserId = parseInt(req.query.studentId || req.user?.id || req.headers?.['x-user-id'] || '0', 10);
+    const requestingUserId = parseInt(req.query.studentId || req.query.instructorId || req.user?.id || req.headers?.['x-user-id'] || '0', 10);
 
-    // Students can only see their own requests; admins see all
-    if (role !== 'admin' && role !== 'student') {
-      return res.status(403).json({ success: false, error: 'Access denied.' });
+    let whereSql = '';
+    let params = [];
+
+    if (role === 'student') {
+      whereSql = 'WHERE er.student_id = ?';
+      params.push(requestingUserId);
+    } else if (role === 'instructor') {
+      // Fetch proctor_id for this instructor
+      const inst = await dbGet('SELECT * FROM instructor WHERE instructor_id = ?', [requestingUserId]);
+      let proctorId = 1;
+      if (inst) {
+        const p = await getOrSyncProctorForInstructor(inst);
+        proctorId = p ? p.proctor_id : 1;
+      }
+      whereSql = 'WHERE s.proctor_id = ?';
+      params.push(proctorId);
     }
-
-    const studentFilter = role === 'student' ? `WHERE er.student_id = ${requestingUserId}` : '';
 
     const requests = await dbAll(`
       SELECT
@@ -1752,9 +1983,9 @@ export async function getEnrollmentRequests(req, res) {
       JOIN student s ON er.student_id = s.student_id
       JOIN course  c ON er.course_id  = c.course_id
       LEFT JOIN proctor p ON s.proctor_id = p.proctor_id
-      ${studentFilter}
+      ${whereSql}
       ORDER BY er.requested_at DESC
-    `, []);
+    `, params);
 
     res.json({ success: true, requests });
   } catch (err) {
@@ -1766,8 +1997,12 @@ export async function getEnrollmentRequests(req, res) {
 export async function approveEnrollmentRequest(req, res) {
   try {
     const role = (req.body?.role || req.query?.role || req.user?.role || req.headers?.['x-user-role'] || '').toLowerCase();
-    if (role !== 'admin') {
-      return res.status(403).json({ success: false, error: 'Only admins can approve enrollment requests.' });
+    if (role === 'student') {
+      return res.status(403).json({ success: false, error: 'Access Denied: Students cannot approve enrollment requests.' });
+    }
+
+    if (role !== 'admin' && role !== 'instructor') {
+      return res.status(403).json({ success: false, error: 'Access Denied: Unauthorized role for enrollment approval.' });
     }
 
     const { request_id, action, notes } = req.body;
@@ -1781,15 +2016,13 @@ export async function approveEnrollmentRequest(req, res) {
       return res.status(404).json({ success: false, error: 'Enrollment request not found.' });
     }
 
-    if (action === 'reject') {
-      await dbRun(
-        "UPDATE enrollment_request SET status='REJECTED', admin_notes=?, updated_at=CURRENT_TIMESTAMP WHERE request_id=?",
-        [notes || null, rId]
-      );
-      return res.json({ success: true, message: 'Enrollment request rejected.' });
-    }
-
     if (action === 'admin_approve') {
+      if (role !== 'admin') {
+        return res.status(403).json({ 
+          success: false, 
+          error: 'Access Denied: Only administrators can approve the Admin Gate. Admin and proctor approvals are strictly independent.' 
+        });
+      }
       await dbRun(
         "UPDATE enrollment_request SET admin_approved=1, status='ADMIN_APPROVED', admin_notes=?, updated_at=CURRENT_TIMESTAMP WHERE request_id=?",
         [notes || null, rId]
@@ -1799,10 +2032,34 @@ export async function approveEnrollmentRequest(req, res) {
       if (updated.proctor_approved === 1) {
         return finalizeEnrollment(updated, res);
       }
-      return res.json({ success: true, message: 'Admin approval granted. Waiting for proctor approval.' });
+      return res.json({ success: true, message: 'Admin approval granted. Waiting for independent proctor approval.' });
     }
 
     if (action === 'proctor_approve') {
+      if (role !== 'instructor') {
+        return res.status(403).json({ 
+          success: false, 
+          error: 'Access Denied: Only assigned faculty proctors can approve the Proctor Gate. Administrators cannot approve on the proctor\'s behalf.' 
+        });
+      }
+
+      // If specific instructor identity is available, verify assigned proctor ownership
+      const callerId = req.user?.id || (req.headers?.['x-user-id'] ? parseInt(req.headers['x-user-id'], 10) : null) || parseInt(req.body?.instructorId || req.query?.instructorId || '0', 10);
+      if (callerId) {
+        try {
+          const callerProctor = await getOrSyncProctorForInstructor({ instructor_id: callerId });
+          const student = await dbGet('SELECT proctor_id FROM student WHERE student_id = ?', [request.student_id]);
+          if (student?.proctor_id && callerProctor?.proctor_id && student.proctor_id !== callerProctor.proctor_id) {
+            return res.status(403).json({
+              success: false,
+              error: `Access Denied: Student is assigned to Proctor #${student.proctor_id}. You are Proctor #${callerProctor.proctor_id}. Proctors can only approve their own assigned student wards.`
+            });
+          }
+        } catch (procErr) {
+          console.warn('[LMS] Proctor ownership verification note:', procErr.message);
+        }
+      }
+
       await dbRun(
         "UPDATE enrollment_request SET proctor_approved=1, updated_at=CURRENT_TIMESTAMP WHERE request_id=?",
         [rId]
@@ -1811,7 +2068,16 @@ export async function approveEnrollmentRequest(req, res) {
       if (updated.admin_approved === 1) {
         return finalizeEnrollment(updated, res);
       }
-      return res.json({ success: true, message: 'Proctor approval granted. Waiting for admin approval.' });
+      return res.json({ success: true, message: 'Proctor approval granted. Waiting for independent admin approval.' });
+    }
+
+    if (action === 'reject') {
+      const rejectNote = notes || (role === 'admin' ? 'Rejected by Administration.' : 'Disapproved by Faculty Proctor.');
+      await dbRun(
+        "UPDATE enrollment_request SET status='REJECTED', admin_notes=?, updated_at=CURRENT_TIMESTAMP WHERE request_id=?",
+        [rejectNote, rId]
+      );
+      return res.json({ success: true, message: `Enrollment request rejected by ${role === 'admin' ? 'Administrator' : 'Faculty Proctor'}.` });
     }
 
     return res.status(400).json({ success: false, error: `Unknown action: ${action}` });
@@ -1884,7 +2150,7 @@ export async function getInstructorNotifications(req, res) {
        FROM instructor_notification n
        LEFT JOIN student s ON n.student_id = s.student_id
        LEFT JOIN course  c ON n.course_id  = c.course_id
-       WHERE n.instructor_id = ?
+       WHERE n.instructor_id = ? AND n.message NOT LIKE '[PROCTOR_MEET]%'
        ORDER BY n.created_at DESC
        LIMIT 50`,
       [instructorId]
@@ -1904,6 +2170,321 @@ export async function markNotificationRead(req, res) {
     await dbRun('UPDATE instructor_notification SET is_read = 1 WHERE notification_id = ?', [notifId]);
     res.json({ success: true, message: 'Notification marked as read.' });
   } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+}
+
+// 30b. Unified Role-Aware User Notifications (Navbar Feed)
+export async function getUserNotifications(req, res) {
+  try {
+    const role = (req.query?.role || req.user?.role || req.headers?.['x-user-role'] || 'student').toLowerCase();
+    const userId = parseInt(req.query?.userId || req.user?.id || req.headers?.['x-user-id'] || '101', 10);
+
+    let notifications = [];
+    if (role === 'instructor') {
+      notifications = await dbAll(
+        `SELECT n.*, s.first_name || ' ' || s.last_name AS student_name, c.course_name
+         FROM instructor_notification n
+         LEFT JOIN student s ON n.student_id = s.student_id
+         LEFT JOIN course  c ON n.course_id  = c.course_id
+         WHERE n.instructor_id = ?
+         ORDER BY n.created_at DESC
+         LIMIT 40`,
+        [userId]
+      );
+    } else if (role === 'student') {
+      notifications = await dbAll(
+        `SELECT n.*, i.first_name || ' ' || i.last_name AS instructor_name, c.course_name
+         FROM instructor_notification n
+         LEFT JOIN instructor i ON n.instructor_id = i.instructor_id
+         LEFT JOIN course  c ON n.course_id  = c.course_id
+         WHERE n.student_id = ?
+         ORDER BY n.created_at DESC
+         LIMIT 40`,
+        [userId]
+      );
+    } else if (role === 'admin') {
+      notifications = await dbAll(
+        `SELECT n.*, s.first_name || ' ' || s.last_name AS student_name, i.first_name || ' ' || i.last_name as instructor_name, c.course_name
+         FROM instructor_notification n
+         LEFT JOIN student s ON n.student_id = s.student_id
+         LEFT JOIN instructor i ON n.instructor_id = i.instructor_id
+         LEFT JOIN course  c ON n.course_id  = c.course_id
+         ORDER BY n.created_at DESC
+         LIMIT 40`
+      );
+    }
+
+    const unreadCount = notifications.filter(n => n.is_read === 0).length;
+    res.json({ success: true, notifications, unreadCount });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+}
+
+// 30c. Mark All Notifications Read for User
+export async function markAllUserNotificationsRead(req, res) {
+  try {
+    const role = (req.body?.role || req.user?.role || req.headers?.['x-user-role'] || 'student').toLowerCase();
+    const userId = parseInt(req.body?.userId || req.user?.id || req.headers?.['x-user-id'] || '101', 10);
+
+    if (role === 'instructor') {
+      await dbRun('UPDATE instructor_notification SET is_read = 1 WHERE instructor_id = ?', [userId]);
+    } else if (role === 'student') {
+      await dbRun('UPDATE instructor_notification SET is_read = 1 WHERE student_id = ?', [userId]);
+    } else if (role === 'admin') {
+      await dbRun('UPDATE instructor_notification SET is_read = 1');
+    }
+
+    res.json({ success: true, message: 'All notifications marked as read.' });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+}
+
+// 31. Upload Submission File (Local Disk Storage)
+export async function uploadSubmissionFile(req, res) {
+  try {
+    const { filename, fileData } = req.body;
+    if (!filename || !fileData) {
+      return res.status(400).json({ success: false, error: 'Filename and fileData are required for upload.' });
+    }
+
+    const cleanName = filename.replace(/[^a-zA-Z0-9._-]/g, '_');
+    const ext = path.extname(cleanName).toLowerCase();
+    const disallowedExtensions = [
+      '.html', '.htm', '.xhtml', '.svg', '.exe', '.sh', '.bash', 
+      '.bat', '.cmd', '.php', '.phtml', '.js', '.mjs', '.cjs', 
+      '.vbs', '.com', '.scr', '.msi', '.cgi', '.pl'
+    ];
+    if (disallowedExtensions.includes(ext) || !ext) {
+      return res.status(400).json({ 
+        success: false, 
+        error: `File type '${ext || 'unknown'}' is not allowed for coursework upload. Permitted formats include PDF, code files (.py, .sql, .java, .c, .cpp), archives (.zip), images, and office documents.` 
+      });
+    }
+
+    const uniqueName = `${Date.now()}_${cleanName}`;
+    const uploadsDir = path.resolve(__dirname, '../../uploads');
+
+    if (!fs.existsSync(uploadsDir)) {
+      fs.mkdirSync(uploadsDir, { recursive: true });
+    }
+
+    const base64Data = fileData.replace(/^data:([A-Za-z-+/]+);base64,/, '');
+    const buffer = Buffer.from(base64Data, 'base64');
+    if (buffer.length > 15 * 1024 * 1024) {
+      return res.status(400).json({ success: false, error: 'File size exceeds maximum allowed limit (15MB).' });
+    }
+
+    const filePath = path.join(uploadsDir, uniqueName);
+    await fs.promises.writeFile(filePath, buffer);
+
+    const fileUrl = `/uploads/${uniqueName}`;
+    res.json({ success: true, fileUrl, filename: cleanName });
+  } catch (err) {
+    console.error('File upload error:', err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+}
+
+// 32. Request Proctor Meeting (Student-Initiated)
+export async function requestProctorMeeting(req, res) {
+  try {
+    const { student_id, topic, preferred_time, notes } = req.body;
+    if (!student_id || !topic) {
+      return res.status(400).json({ success: false, error: 'student_id and topic are required.' });
+    }
+
+    const student = await dbGet('SELECT * FROM student WHERE student_id = ?', [student_id]);
+    if (!student) {
+      return res.status(404).json({ success: false, error: 'Student record not found.' });
+    }
+
+    const proctorId = student.proctor_id || 1;
+    const pRow = await dbGet('SELECT * FROM proctor WHERE proctor_id = ?', [proctorId]);
+    let instructor = null;
+    if (pRow) {
+      instructor = await dbGet(
+        'SELECT * FROM instructor WHERE LOWER(TRIM(first_name)) = LOWER(TRIM(?)) AND LOWER(TRIM(last_name)) = LOWER(TRIM(?))',
+        [pRow.first_name, pRow.last_name]
+      ) || (pRow.cabin_no ? await dbGet('SELECT * FROM instructor WHERE UPPER(TRIM(cabin_no)) = UPPER(TRIM(?))', [pRow.cabin_no]) : null);
+    }
+    if (!instructor) {
+      instructor = await dbGet('SELECT * FROM instructor WHERE instructor_id = ?', [200 + proctorId]);
+    }
+    const instructorId = instructor ? instructor.instructor_id : 201;
+
+    const meetingData = {
+      type: 'MEET_REQUEST',
+      initiated_by: 'STUDENT',
+      topic: topic.trim(),
+      preferred_time: (preferred_time || 'Next Available Slot').trim(),
+      scheduled_time: (preferred_time || 'Awaiting Confirmation').trim(),
+      venue: instructor?.cabin_no || 'Cabin 401',
+      notes: (notes || '').trim(),
+      status: 'PENDING',
+      advisory_notes: '',
+      student_id,
+      student_name: `${student.first_name} ${student.last_name}`,
+      proctor_name: instructor ? `Prof. ${instructor.first_name} ${instructor.last_name}` : 'Faculty Proctor'
+    };
+
+    const message = `[PROCTOR_MEET]${JSON.stringify(meetingData)}`;
+    const result = await dbRun(
+      'INSERT INTO instructor_notification (instructor_id, student_id, message, is_read) VALUES (?, ?, ?, 0)',
+      [instructorId, student_id, message]
+    );
+
+    res.json({
+      success: true,
+      message: `Meeting request submitted to Prof. ${instructor?.first_name || 'Proctor'}!`,
+      meetingId: result.lastInsertRowid,
+      meeting: meetingData
+    });
+  } catch (err) {
+    console.error('Request proctor meeting error:', err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+}
+
+// 33. Schedule Proctor Meeting (Proctor-Initiated Summon)
+export async function scheduleProctorMeeting(req, res) {
+  try {
+    const { instructor_id, student_id, topic, scheduled_time, venue, notes } = req.body;
+    if (!instructor_id || !student_id || !topic || !scheduled_time) {
+      return res.status(400).json({ success: false, error: 'instructor_id, student_id, topic, and scheduled_time are required.' });
+    }
+
+    const student = await dbGet('SELECT * FROM student WHERE student_id = ?', [student_id]);
+    const instructor = await dbGet('SELECT * FROM instructor WHERE instructor_id = ?', [instructor_id]);
+
+    const meetingData = {
+      type: 'PROCTOR_SUMMON',
+      initiated_by: 'PROCTOR',
+      topic: topic.trim(),
+      preferred_time: scheduled_time.trim(),
+      scheduled_time: scheduled_time.trim(),
+      venue: (venue || instructor?.cabin_no || 'Cabin 401').trim(),
+      notes: (notes || 'Academic Mentorship & Progress Review').trim(),
+      status: 'SCHEDULED',
+      advisory_notes: '',
+      student_id,
+      student_name: student ? `${student.first_name} ${student.last_name}` : `Student #${student_id}`,
+      proctor_name: instructor ? `Prof. ${instructor.first_name} ${instructor.last_name}` : 'Faculty Proctor'
+    };
+
+    const message = `[PROCTOR_MEET]${JSON.stringify(meetingData)}`;
+    const result = await dbRun(
+      'INSERT INTO instructor_notification (instructor_id, student_id, message, is_read) VALUES (?, ?, ?, 0)',
+      [instructor_id, student_id, message]
+    );
+
+    res.json({
+      success: true,
+      message: `Mentorship session scheduled with ${student ? student.first_name : 'ward'}!`,
+      meetingId: result.lastInsertRowid
+    });
+  } catch (err) {
+    console.error('Schedule proctor meeting error:', err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+}
+
+// 34. Get Proctor Meetings (Filtered by Role & User)
+export async function getProctorMeetings(req, res) {
+  try {
+    const role = (req.query?.role || req.user?.role || req.headers?.['x-user-role'] || 'student').toLowerCase();
+    const userId = parseInt(req.query?.userId || req.user?.id || req.headers?.['x-user-id'] || '0', 10);
+
+    let rows = [];
+    if (role === 'student') {
+      rows = await dbAll(`
+        SELECT n.*, i.first_name as proctor_first, i.last_name as proctor_last, i.cabin_no as proctor_cabin, i.email as proctor_email
+        FROM instructor_notification n
+        LEFT JOIN instructor i ON n.instructor_id = i.instructor_id
+        WHERE n.student_id = ? AND n.message LIKE '[PROCTOR_MEET]%'
+        ORDER BY n.notification_id DESC
+      `, [userId]);
+    } else {
+      rows = await dbAll(`
+        SELECT n.*, s.first_name as student_first, s.last_name as student_last, s.email as student_email
+        FROM instructor_notification n
+        LEFT JOIN student s ON n.student_id = s.student_id
+        WHERE n.instructor_id = ? AND n.message LIKE '[PROCTOR_MEET]%'
+        ORDER BY n.notification_id DESC
+      `, [userId]);
+    }
+
+    const meetings = rows.map(r => {
+      let details = {};
+      try {
+        const jsonStr = r.message.replace(/^\[PROCTOR_MEET\]/, '');
+        details = JSON.parse(jsonStr);
+      } catch {
+        details = { topic: r.message, status: 'PENDING' };
+      }
+      return {
+        id: r.notification_id,
+        instructor_id: r.instructor_id,
+        student_id: r.student_id,
+        is_read: r.is_read,
+        created_at: r.created_at,
+        student_name: r.student_first ? `${r.student_first} ${r.student_last}` : details.student_name,
+        proctor_name: r.proctor_first ? `Prof. ${r.proctor_first} ${r.proctor_last}` : details.proctor_name,
+        proctor_cabin: r.proctor_cabin || details.venue,
+        ...details
+      };
+    });
+
+    res.json({ success: true, meetings });
+  } catch (err) {
+    console.error('Get proctor meetings error:', err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+}
+
+// 35. Update Proctor Meeting (Accept / Complete / Cancel / Acknowledge)
+export async function updateProctorMeeting(req, res) {
+  try {
+    const meetingId = parseInt(req.params.id, 10);
+    const { action, scheduled_time, venue, advisory_notes } = req.body;
+
+    const notif = await dbGet('SELECT * FROM instructor_notification WHERE notification_id = ?', [meetingId]);
+    if (!notif) {
+      return res.status(404).json({ success: false, error: 'Meeting record not found.' });
+    }
+
+    let details = {};
+    try {
+      details = JSON.parse(notif.message.replace(/^\[PROCTOR_MEET\]/, ''));
+    } catch {
+      details = { topic: notif.message };
+    }
+
+    if (action === 'accept') {
+      details.status = 'SCHEDULED';
+      if (scheduled_time) details.scheduled_time = scheduled_time.trim();
+      if (venue) details.venue = venue.trim();
+    } else if (action === 'complete') {
+      details.status = 'COMPLETED';
+      if (advisory_notes) details.advisory_notes = advisory_notes.trim();
+    } else if (action === 'cancel') {
+      details.status = 'CANCELLED';
+    } else if (action === 'acknowledge') {
+      details.status = 'CONFIRMED';
+    }
+
+    const updatedMessage = `[PROCTOR_MEET]${JSON.stringify(details)}`;
+    await dbRun('UPDATE instructor_notification SET message = ?, is_read = 1 WHERE notification_id = ?', [updatedMessage, meetingId]);
+
+    res.json({
+      success: true,
+      message: `Meeting updated successfully (Status: ${details.status})!`,
+      meeting: { id: meetingId, ...details }
+    });
+  } catch (err) {
+    console.error('Update proctor meeting error:', err);
     res.status(500).json({ success: false, error: err.message });
   }
 }
