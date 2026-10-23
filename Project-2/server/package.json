@@ -1,0 +1,20 @@
+{
+  "name": "lms-server",
+  "version": "1.0.0",
+  "description": "LMS Backend API with Dual-Mode Database Support (MySQL + SQLite)",
+  "type": "module",
+  "main": "src/server.js",
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "node --watch src/server.js",
+    "test": "node src/testIntegration.js && node src/testInstructorAssignmentFlow.js && node src/testGradingFlow.js && node src/testInstructorFlow.js && node src/testSecurityAndRank.js && node src/testStudentPortal.js && node src/testInstructorProfileAndProctor.js && node src/testAdminEnhancements.js && node src/testEnrollmentApproval.js && node src/testNotifications.js && node src/testFixes16_14_12_11_9.js && node src/testSecurityAuditFixes.js"
+  },
+  "dependencies": {
+    "better-sqlite3": "^11.8.1",
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.7",
+    "express": "^4.21.2",
+    "mysql2": "^3.12.0",
+    "neo4j-driver": "^6.2.0"
+  }
+}
